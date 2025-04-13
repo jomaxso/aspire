@@ -47,6 +47,10 @@ internal sealed class PublishCommand : BaseCommand
         outputPath.Description = "The output path for the generated artifacts.";
         outputPath.DefaultValueFactory = (result) => Path.Combine(Environment.CurrentDirectory);
         Options.Add(outputPath);
+        
+        var noCacheOption = new Option<bool>("--no-cache", "-nc");
+        noCacheOption.Description = "Do not use cached build of the app host.";
+        Options.Add(noCacheOption);
     }
 
     protected override async Task<int> ExecuteAsync(ParseResult parseResult, CancellationToken cancellationToken)
@@ -79,7 +83,8 @@ internal sealed class PublishCommand : BaseCommand
                 return ExitCodeConstants.FailedToDotnetRunAppHost;
             }
 
-            var buildExitCode = await AppHostHelper.BuildAppHostAsync(_appHostBuilder, _interactionService, effectiveAppHostProjectFile, cancellationToken);
+            var useCache = !parseResult.GetValue<bool>("--no-cache");
+            var buildExitCode = await AppHostHelper.BuildAppHostAsync(_appHostBuilder, useCache, _interactionService, effectiveAppHostProjectFile, cancellationToken);
 
             if (buildExitCode != 0)
             {

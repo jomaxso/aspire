@@ -60,10 +60,10 @@ internal static class AppHostHelper
         return appHostInformationResult;
     }
     
-    internal static async Task<int> BuildAppHostAsync(IAppHostBuilder appHostBuilder, IInteractionService interactionService, FileInfo projectFile, CancellationToken cancellationToken)
+    internal static async Task<int> BuildAppHostAsync(IAppHostBuilder appHostBuilder, bool useCache, IInteractionService interactionService, FileInfo projectFile, CancellationToken cancellationToken)
     {
         return await interactionService.ShowStatusAsync(
             ":hammer_and_wrench:  Building app host...",
-            () => appHostBuilder.BuildAppHostAsync(projectFile, true, cancellationToken));
+            () => appHostBuilder.BuildAppHostAsync(projectFile, useCache, cancellationToken));
     }
 }

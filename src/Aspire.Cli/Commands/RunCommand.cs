@@ -48,6 +48,10 @@ internal sealed class RunCommand : BaseCommand
         var watchOption = new Option<bool>("--watch", "-w");
         watchOption.Description = "Start project resources in watch mode.";
         Options.Add(watchOption);
+
+        var noCacheOption = new Option<bool>("--no-cache", "-nc");
+        noCacheOption.Description = "Do not use cached build of the app host.";
+        Options.Add(noCacheOption);
     }
 
     protected override async Task<int> ExecuteAsync(ParseResult parseResult, CancellationToken cancellationToken)
@@ -94,7 +98,8 @@ internal sealed class RunCommand : BaseCommand
 
             if (!watch)
             {
-                var buildExitCode = await AppHostHelper.BuildAppHostAsync(_appHostBuilder, _interactionService, effectiveAppHostProjectFile, cancellationToken);
+                var useCache = !parseResult.GetValue<bool>("--no-cache");
+                var buildExitCode = await AppHostHelper.BuildAppHostAsync(_appHostBuilder, useCache, _interactionService, effectiveAppHostProjectFile, cancellationToken);
 
                 if (buildExitCode != 0)
                 {
