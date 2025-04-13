@@ -4,6 +4,7 @@
 using System.CommandLine;
 using System.Diagnostics;
 using Aspire.Cli.Backchannel;
+using Aspire.Cli.Builds;
 using Aspire.Cli.Interaction;
 using Aspire.Cli.Projects;
 using Aspire.Cli.Utils;
@@ -18,17 +19,20 @@ internal sealed class PublishCommand : BaseCommand
     private readonly IDotNetCliRunner _runner;
     private readonly IInteractionService _interactionService;
     private readonly IProjectLocator _projectLocator;
+    private readonly IAppHostBuilder _appHostBuilder;
 
-    public PublishCommand(IDotNetCliRunner runner, IInteractionService interactionService, IProjectLocator projectLocator)
+    public PublishCommand(IDotNetCliRunner runner, IInteractionService interactionService, IProjectLocator projectLocator, IAppHostBuilder appHostBuilder)
         : base("publish", "Generates deployment artifacts for an Aspire app host project.")
     {
         ArgumentNullException.ThrowIfNull(runner);
         ArgumentNullException.ThrowIfNull(interactionService);
         ArgumentNullException.ThrowIfNull(projectLocator);
+        ArgumentNullException.ThrowIfNull(appHostBuilder);
 
         _runner = runner;
         _interactionService = interactionService;
         _projectLocator = projectLocator;
+        _appHostBuilder = appHostBuilder;
 
         var projectOption = new Option<FileInfo?>("--project");
         projectOption.Description = "The path to the Aspire app host project file.";
@@ -75,7 +79,7 @@ internal sealed class PublishCommand : BaseCommand
                 return ExitCodeConstants.FailedToDotnetRunAppHost;
             }
 
-            var buildExitCode = await AppHostHelper.BuildAppHostAsync(_runner, _interactionService, effectiveAppHostProjectFile, cancellationToken);
+            var buildExitCode = await AppHostHelper.BuildAppHostAsync(_appHostBuilder, _interactionService, effectiveAppHostProjectFile, cancellationToken);
 
             if (buildExitCode != 0)
             {

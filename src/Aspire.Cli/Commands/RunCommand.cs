@@ -4,6 +4,7 @@
 using System.CommandLine;
 using System.Diagnostics;
 using Aspire.Cli.Backchannel;
+using Aspire.Cli.Builds;
 using Aspire.Cli.Certificates;
 using Aspire.Cli.Interaction;
 using Aspire.Cli.Projects;
@@ -22,19 +23,22 @@ internal sealed class RunCommand : BaseCommand
     private readonly IInteractionService _interactionService;
     private readonly ICertificateService _certificateService;
     private readonly IProjectLocator _projectLocator;
+    private readonly IAppHostBuilder _appHostBuilder;
 
-    public RunCommand(IDotNetCliRunner runner, IInteractionService interactionService, ICertificateService certificateService, IProjectLocator projectLocator)
+    public RunCommand(IDotNetCliRunner runner, IInteractionService interactionService, ICertificateService certificateService, IProjectLocator projectLocator, IAppHostBuilder appHostBuilder)
         : base("run", "Run an Aspire app host in development mode.")
     {
         ArgumentNullException.ThrowIfNull(runner);
         ArgumentNullException.ThrowIfNull(interactionService);
         ArgumentNullException.ThrowIfNull(certificateService);
         ArgumentNullException.ThrowIfNull(projectLocator);
+        ArgumentNullException.ThrowIfNull(appHostBuilder);
 
         _runner = runner;
         _interactionService = interactionService;
         _certificateService = certificateService;
         _projectLocator = projectLocator;
+        _appHostBuilder = appHostBuilder;
 
         var projectOption = new Option<FileInfo?>("--project");
         projectOption.Description = "The path to the Aspire app host project file.";
@@ -90,7 +94,7 @@ internal sealed class RunCommand : BaseCommand
 
             if (!watch)
             {
-                var buildExitCode = await AppHostHelper.BuildAppHostAsync(_runner, _interactionService, effectiveAppHostProjectFile, cancellationToken);
+                var buildExitCode = await AppHostHelper.BuildAppHostAsync(_appHostBuilder, _interactionService, effectiveAppHostProjectFile, cancellationToken);
 
                 if (buildExitCode != 0)
                 {

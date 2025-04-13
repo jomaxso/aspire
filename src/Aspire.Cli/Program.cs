@@ -5,6 +5,7 @@ using System.CommandLine;
 using System.Diagnostics;
 using System.Text;
 using Aspire.Cli.Backchannel;
+using Aspire.Cli.Builds;
 using Aspire.Cli.Certificates;
 using Aspire.Cli.Commands;
 using Aspire.Cli.Interaction;
@@ -76,6 +77,7 @@ public class Program
 
         // Shared services.
         builder.Services.AddSingleton(BuildProjectLocator);
+        builder.Services.AddSingleton<IAppHostBuilder, AppHostBuilder>();
         builder.Services.AddSingleton<INewCommandPrompter, NewCommandPrompter>();
         builder.Services.AddSingleton<IInteractionService, InteractionService>();
         builder.Services.AddSingleton<ICertificateService, CertificateService>();

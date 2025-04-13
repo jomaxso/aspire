@@ -1,6 +1,7 @@
 // Licensed to the .NET Foundation under one or more agreements.
 // The .NET Foundation licenses this file to you under the MIT license.
 
+using Aspire.Cli.Builds;
 using Aspire.Cli.Interaction;
 using Semver;
 using System.Diagnostics;
@@ -59,10 +60,10 @@ internal static class AppHostHelper
         return appHostInformationResult;
     }
     
-    internal static async Task<int> BuildAppHostAsync(IDotNetCliRunner runner, IInteractionService interactionService, FileInfo projectFile, CancellationToken cancellationToken)
+    internal static async Task<int> BuildAppHostAsync(IAppHostBuilder appHostBuilder, IInteractionService interactionService, FileInfo projectFile, CancellationToken cancellationToken)
     {
         return await interactionService.ShowStatusAsync(
             ":hammer_and_wrench:  Building app host...",
-            () => runner.BuildAsync(projectFile, cancellationToken));
+            () => appHostBuilder.BuildAppHostAsync(projectFile, true, cancellationToken));
     }
 }
