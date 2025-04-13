@@ -1,6 +1,7 @@
 // Licensed to the .NET Foundation under one or more agreements.
 // The .NET Foundation licenses this file to you under the MIT license.
 
+using Aspire.Cli.Builds;
 using Aspire.Cli.Certificates;
 using Aspire.Cli.Commands;
 using Aspire.Cli.Interaction;
@@ -20,6 +21,7 @@ internal static class CliTestHelper
         var services = new ServiceCollection();
         services.AddLogging();
 
+        services.AddSingleton(options.AppHostBuilderFactory);
         services.AddSingleton(options.ProjectLocatorFactory);
         services.AddSingleton(options.InteractiveServiceFactory);
         services.AddSingleton(options.CertificateServiceFactory);
@@ -38,6 +40,12 @@ internal static class CliTestHelper
 
 internal sealed class CliServiceCollectionTestOptions
 {
+    public Func<IServiceProvider, IAppHostBuilder> AppHostBuilderFactory { get; set; } = (IServiceProvider serviceProvider) => {
+        var logger = serviceProvider.GetRequiredService<ILogger<AppHostBuilder>>();
+        var runner = serviceProvider.GetRequiredService<IDotNetCliRunner>();
+        return new AppHostBuilder(logger, runner);
+    };
+
     public Func<IServiceProvider, INewCommandPrompter> NewCommandPrompterFactory { get; set; } = (IServiceProvider serviceProvider) =>
     {
         var interactionService = serviceProvider.GetRequiredService<IInteractionService>();
