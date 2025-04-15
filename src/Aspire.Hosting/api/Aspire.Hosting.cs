@@ -564,6 +564,9 @@ namespace Aspire.Hosting
         public static ApplicationModel.IResourceBuilder<T> WithUrlForEndpoint<T>(this ApplicationModel.IResourceBuilder<T> builder, string endpointName, System.Action<ApplicationModel.ResourceUrlAnnotation> callback)
             where T : ApplicationModel.IResource { throw null; }
 
+        public static ApplicationModel.IResourceBuilder<T> WithUrlForEndpoint<T>(this ApplicationModel.IResourceBuilder<T> builder, string endpointName, System.Func<ApplicationModel.EndpointReference, ApplicationModel.ResourceUrlAnnotation> callback)
+            where T : ApplicationModel.IResourceWithEndpoints { throw null; }
+
         public static ApplicationModel.IResourceBuilder<T> WithUrls<T>(this ApplicationModel.IResourceBuilder<T> builder, System.Action<ApplicationModel.ResourceUrlsCallbackContext> callback)
             where T : ApplicationModel.IResource { throw null; }
 
@@ -1746,6 +1749,8 @@ namespace Aspire.Hosting.ApplicationModel
     public sealed partial class ResourceUrlAnnotation : IResourceAnnotation
     {
         public int? DisplayOrder;
+        public UrlDisplayLocation DisplayLocation { get { throw null; } set { } }
+
         public string? DisplayText { get { throw null; } set { } }
 
         public EndpointReference? Endpoint { get { throw null; } init { } }
@@ -1775,6 +1780,8 @@ namespace Aspire.Hosting.ApplicationModel
         public IResource Resource { get { throw null; } }
 
         public System.Collections.Generic.List<ResourceUrlAnnotation> Urls { get { throw null; } }
+
+        public EndpointReference? GetEndpoint(string name) { throw null; }
     }
 
     public sealed partial class UpdateCommandStateContext
@@ -1782,6 +1789,12 @@ namespace Aspire.Hosting.ApplicationModel
         public required CustomResourceSnapshot ResourceSnapshot { get { throw null; } init { } }
 
         public required System.IServiceProvider ServiceProvider { get { throw null; } init { } }
+    }
+
+    public enum UrlDisplayLocation
+    {
+        SummaryAndDetails = 0,
+        DetailsOnly = 1
     }
 
     public sealed partial record UrlDisplayPropertiesSnapshot(string DisplayName = "", int SortOrder = 0)
@@ -1983,15 +1996,27 @@ namespace Aspire.Hosting.Publishing
     }
 
     [System.Diagnostics.CodeAnalysis.Experimental("ASPIREPUBLISHERS001")]
+    public sealed partial class NullPublishingActivityProgressReporter : IPublishingActivityProgressReporter
+    {
+        internal NullPublishingActivityProgressReporter() { }
+
+        public static NullPublishingActivityProgressReporter Instance { get { throw null; } }
+
+        public System.Threading.Tasks.Task<PublishingActivity> CreateActivityAsync(string id, string initialStatusText, bool isPrimary, System.Threading.CancellationToken cancellationToken) { throw null; }
+
+        public System.Threading.Tasks.Task UpdateActivityStatusAsync(PublishingActivity publishingActivity, System.Func<PublishingActivityStatus, PublishingActivityStatus> statusUpdate, System.Threading.CancellationToken cancellationToken) { throw null; }
+    }
+
+    [System.Diagnostics.CodeAnalysis.Experimental("ASPIREPUBLISHERS001")]
     public sealed partial class PublishingActivity
     {
-        internal PublishingActivity() { }
+        public PublishingActivity(string id, bool isPrimary = false) { }
 
         public string Id { get { throw null; } }
 
         public bool IsPrimary { get { throw null; } }
 
-        public PublishingActivityStatus? LastStatus { get { throw null; } }
+        public PublishingActivityStatus? LastStatus { get { throw null; } set { } }
     }
 
     [System.Diagnostics.CodeAnalysis.Experimental("ASPIREPUBLISHERS001")]

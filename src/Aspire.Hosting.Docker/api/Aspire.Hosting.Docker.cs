@@ -20,6 +20,8 @@ namespace Aspire.Hosting.Docker
 {
     public sealed partial class DockerComposePublisherOptions : Publishing.PublishingOptions
     {
+        public bool BuildImages { get { throw null; } set { } }
+
         public string? DefaultContainerRegistry { get { throw null; } set { } }
 
         public string? ExistingNetworkName { get { throw null; } set { } }
