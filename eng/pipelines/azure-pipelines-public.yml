@@ -146,7 +146,7 @@ stages:
 
           pool:
             name: $(DncEngPublicBuildPool)
-            demands: ImageOverride -equals build.ubuntu.2004.amd64.open
+            vmImage: 'ubuntu-24.04'
 
           variables:
             - name: _buildScript
