@@ -22,14 +22,13 @@ internal class PackagingService(CliExecutionContext executionContext, INuGetPack
         var stableChannel = PackageChannel.CreateExplicitChannel("stable", PackageChannelQuality.Stable, new[]
         {
             new PackageMapping(PackageMapping.AllPackages, "https://api.nuget.org/v3/index.json")
-        }, nuGetPackageCache);
+        }, nuGetPackageCache, cliDownloadBaseUrl: "https://aka.ms/dotnet/9/aspire/ga/daily");
 
         var dailyChannel = PackageChannel.CreateExplicitChannel("daily", PackageChannelQuality.Prerelease, new[]
         {
             new PackageMapping("Aspire*", "https://pkgs.dev.azure.com/dnceng/public/_packaging/dotnet9/nuget/v3/index.json"),
-            new PackageMapping("Microsoft.Extensions.ServiceDiscovery*", "https://pkgs.dev.azure.com/dnceng/public/_packaging/dotnet9/nuget/v3/index.json"),
             new PackageMapping(PackageMapping.AllPackages, "https://api.nuget.org/v3/index.json")
-        }, nuGetPackageCache);
+        }, nuGetPackageCache, cliDownloadBaseUrl: "https://aka.ms/dotnet/9/aspire/daily");
 
         var prPackageChannels = new List<PackageChannel>();
 
@@ -45,7 +44,6 @@ internal class PackagingService(CliExecutionContext executionContext, INuGetPack
                 var prChannel = PackageChannel.CreateExplicitChannel(prHive.Name, PackageChannelQuality.Prerelease, new[]
                 {
                     new PackageMapping("Aspire*", prHive.FullName),
-                    new PackageMapping("Microsoft.Extensions.ServiceDiscovery*", prHive.FullName),
                     new PackageMapping(PackageMapping.AllPackages, "https://api.nuget.org/v3/index.json")
                 }, nuGetPackageCache);
 
@@ -81,9 +79,8 @@ internal class PackagingService(CliExecutionContext executionContext, INuGetPack
         var stagingChannel = PackageChannel.CreateExplicitChannel("staging", PackageChannelQuality.Stable, new[]
         {
             new PackageMapping("Aspire*", stagingFeedUrl),
-            new PackageMapping("Microsoft.Extensions.ServiceDiscovery*", stagingFeedUrl),
             new PackageMapping(PackageMapping.AllPackages, "https://api.nuget.org/v3/index.json")
-        }, nuGetPackageCache, configureGlobalPackagesFolder: true);
+        }, nuGetPackageCache, configureGlobalPackagesFolder: true, cliDownloadBaseUrl: "https://aka.ms/dotnet/9/aspire/rc/daily");
 
         return stagingChannel;
     }

@@ -44,7 +44,7 @@ public class PackagingServiceTests(ITestOutputHelper outputHelper)
         var tempDir = workspace.WorkspaceRoot;
         var hivesDir = new DirectoryInfo(Path.Combine(tempDir.FullName, ".aspire", "hives"));
         var cacheDir = new DirectoryInfo(Path.Combine(tempDir.FullName, ".aspire", "cache"));
-        var executionContext = new CliExecutionContext(tempDir, hivesDir, cacheDir);
+        var executionContext = new CliExecutionContext(tempDir, hivesDir, cacheDir, new DirectoryInfo(Path.Combine(Path.GetTempPath(), "aspire-test-runtimes")));
         
         var features = new TestFeatures();
         var configuration = new ConfigurationBuilder().Build();
@@ -79,7 +79,7 @@ public class PackagingServiceTests(ITestOutputHelper outputHelper)
         var tempDir = workspace.WorkspaceRoot;
         var hivesDir = new DirectoryInfo(Path.Combine(tempDir.FullName, ".aspire", "hives"));
         var cacheDir = new DirectoryInfo(Path.Combine(tempDir.FullName, ".aspire", "cache"));
-        var executionContext = new CliExecutionContext(tempDir, hivesDir, cacheDir);
+        var executionContext = new CliExecutionContext(tempDir, hivesDir, cacheDir, new DirectoryInfo(Path.Combine(Path.GetTempPath(), "aspire-test-runtimes")));
         
         var features = new TestFeatures();
         features.SetFeature(KnownFeatures.StagingChannelEnabled, true);
@@ -110,10 +110,6 @@ public class PackagingServiceTests(ITestOutputHelper outputHelper)
         Assert.NotNull(aspireMapping);
         Assert.Equal($"https://pkgs.dev.azure.com/dnceng/public/_packaging/darc-pub-dotnet-aspire-{testHash}/nuget/v3/index.json", aspireMapping.Source);
         
-        var serviceDiscoveryMapping = stagingChannel.Mappings!.FirstOrDefault(m => m.PackageFilter == "Microsoft.Extensions.ServiceDiscovery*");
-        Assert.NotNull(serviceDiscoveryMapping);
-        Assert.Equal($"https://pkgs.dev.azure.com/dnceng/public/_packaging/darc-pub-dotnet-aspire-{testHash}/nuget/v3/index.json", serviceDiscoveryMapping.Source);
-        
         var nugetMapping = stagingChannel.Mappings!.FirstOrDefault(m => m.PackageFilter == "*");
         Assert.NotNull(nugetMapping);
         Assert.Equal("https://api.nuget.org/v3/index.json", nugetMapping.Source);
@@ -127,7 +123,7 @@ public class PackagingServiceTests(ITestOutputHelper outputHelper)
         var tempDir = workspace.WorkspaceRoot;
         var hivesDir = new DirectoryInfo(Path.Combine(tempDir.FullName, ".aspire", "hives"));
         var cacheDir = new DirectoryInfo(Path.Combine(tempDir.FullName, ".aspire", "cache"));
-        var executionContext = new CliExecutionContext(tempDir, hivesDir, cacheDir);
+        var executionContext = new CliExecutionContext(tempDir, hivesDir, cacheDir, new DirectoryInfo(Path.Combine(Path.GetTempPath(), "aspire-test-runtimes")));
         
         var features = new TestFeatures();
         features.SetFeature(KnownFeatures.StagingChannelEnabled, true);
@@ -161,7 +157,7 @@ public class PackagingServiceTests(ITestOutputHelper outputHelper)
         var tempDir = workspace.WorkspaceRoot;
         var hivesDir = new DirectoryInfo(Path.Combine(tempDir.FullName, ".aspire", "hives"));
         var cacheDir = new DirectoryInfo(Path.Combine(tempDir.FullName, ".aspire", "cache"));
-        var executionContext = new CliExecutionContext(tempDir, hivesDir, cacheDir);
+        var executionContext = new CliExecutionContext(tempDir, hivesDir, cacheDir, new DirectoryInfo(Path.Combine(Path.GetTempPath(), "aspire-test-runtimes")));
         
         var features = new TestFeatures();
         features.SetFeature(KnownFeatures.StagingChannelEnabled, true);
@@ -204,7 +200,7 @@ public class PackagingServiceTests(ITestOutputHelper outputHelper)
             .Build();
 
         var packagingService = new PackagingService(
-            new CliExecutionContext(tempDir, tempDir, tempDir), 
+            new CliExecutionContext(tempDir, tempDir, tempDir, new DirectoryInfo(Path.Combine(Path.GetTempPath(), "aspire-test-runtimes"))), 
             new FakeNuGetPackageCache(), 
             features, 
             configuration);

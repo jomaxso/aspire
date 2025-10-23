@@ -2,11 +2,13 @@
 // The .NET Foundation licenses this file to you under the MIT license.
 
 #pragma warning disable ASPIREINTERACTION001
+#pragma warning disable ASPIREPUBLISHERS001
 
 using Aspire.Dashboard.Model;
 using Aspire.Hosting.Dcp;
 using Aspire.Hosting.Eventing;
 using Aspire.Hosting.Orchestrator;
+using Aspire.Hosting.Publishing;
 using Aspire.Hosting.Tests.Utils;
 using Aspire.Hosting.Utils;
 using Microsoft.AspNetCore.InternalTesting;
@@ -466,8 +468,8 @@ public class ApplicationOrchestratorTests
                 resourceLoggerService,
                 CreateInteractionService(),
                 NullLogger<ParameterProcessor>.Instance,
-                new DistributedApplicationOptions(),
-                executionContext)
+                executionContext,
+                deploymentStateManager: new MockDeploymentStateManager())
             );
     }
 
@@ -476,7 +478,23 @@ public class ApplicationOrchestratorTests
         return new InteractionService(
             NullLogger<InteractionService>.Instance,
             options ?? new DistributedApplicationOptions(),
-            new ServiceCollection().BuildServiceProvider());
+            new ServiceCollection().BuildServiceProvider(),
+            new Microsoft.Extensions.Configuration.ConfigurationBuilder().Build());
+    }
+
+    private sealed class MockDeploymentStateManager : IDeploymentStateManager
+    {
+        public string? StateFilePath => null;
+
+        public Task<DeploymentStateSection> AcquireSectionAsync(string sectionName, CancellationToken cancellationToken = default)
+        {
+            return Task.FromResult(new DeploymentStateSection(sectionName, [], 0));
+        }
+
+        public Task SaveSectionAsync(DeploymentStateSection section, CancellationToken cancellationToken = default)
+        {
+            return Task.CompletedTask;
+        }
     }
 
     private sealed class CustomResource(string name) : Resource(name);

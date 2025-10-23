@@ -1953,4 +1953,60 @@ public class AzureContainerAppsTests
         await Verify(containerBicep, "bicep")
               .AppendContentAsFile(projectBicep, "bicep");
     }
+
+    [Fact]
+    public async Task BindMountNamesWithHyphensAreNormalized()
+    {
+        var builder = TestDistributedApplicationBuilder.Create(DistributedApplicationOperation.Publish);
+
+        builder.AddAzureContainerAppEnvironment("env");
+
+        using var tempDirectory = new TempDirectory();
+
+        // Contents of the Dockerfile are not important for this test
+        File.WriteAllText(Path.Combine(tempDirectory.Path, "Dockerfile"), "FROM alpine");
+
+        builder.AddDockerfile("with-bind-mount", tempDirectory.Path)
+            .WithBindMount(tempDirectory.Path, "/app/data");
+
+        using var app = builder.Build();
+
+        // This should not throw an exception about invalid Bicep identifier
+        await ExecuteBeforeStartHooksAsync(app, default);
+
+        var model = app.Services.GetRequiredService<DistributedApplicationModel>();
+
+        var container = Assert.Single(model.GetContainerResources());
+
+        container.TryGetLastAnnotation<DeploymentTargetAnnotation>(out var target);
+
+        var resource = target?.DeploymentTarget as AzureProvisioningResource;
+
+        Assert.NotNull(resource);
+
+        var (manifest, bicep) = await GetManifestWithBicep(resource);
+
+        await Verify(bicep, "bicep");
+    }
+
+    [Fact]
+    public async Task GetHostAddressExpression()
+    {
+        var builder = TestDistributedApplicationBuilder.Create(DistributedApplicationOperation.Publish);
+
+        var env = builder.AddAzureContainerAppEnvironment("env");
+
+        var project = builder
+            .AddProject<Project>("project1", launchProfileName: null)
+            .WithHttpEndpoint();
+
+        var endpointReferenceEx = ((IComputeEnvironmentResource)env.Resource).GetHostAddressExpression(project.GetEndpoint("http"));
+        Assert.NotNull(endpointReferenceEx);
+
+        Assert.Equal("project1.internal.{0}", endpointReferenceEx.Format);
+        var provider = Assert.Single(endpointReferenceEx.ValueProviders);
+        var output = Assert.IsType<BicepOutputReference>(provider);
+        Assert.Equal(env.Resource, output.Resource);
+        Assert.Equal("AZURE_CONTAINER_APPS_ENVIRONMENT_DEFAULT_DOMAIN", output.Name);
+    }
 }

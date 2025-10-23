@@ -44,6 +44,8 @@ internal sealed class TestExtensionBackchannel : IExtensionBackchannel
 
     public TaskCompletionSource? PromptForSelectionAsyncCalled { get; set; }
 
+    public TaskCompletionSource? PromptForSelectionsAsyncCalled { get; set; }
+
     public TaskCompletionSource? ConfirmAsyncCalled { get; set; }
     public Func<string, bool, Task<bool>>? ConfirmAsyncCallback { get; set; }
 
@@ -75,6 +77,9 @@ internal sealed class TestExtensionBackchannel : IExtensionBackchannel
 
     public TaskCompletionSource? DisplayPlainTextAsyncCalled { get; set; }
     public Func<string, Task>? DisplayPlainTextAsyncCallback { get; set; }
+
+    public TaskCompletionSource? WriteDebugSessionMessageAsyncCalled { get; set; }
+    public Func<string, bool, string?, Task>? WriteDebugSessionMessageAsyncCallback { get; set; }
 
     public Task ConnectAsync(CancellationToken cancellationToken)
     {
@@ -153,6 +158,18 @@ internal sealed class TestExtensionBackchannel : IExtensionBackchannel
         }
 
         return Task.FromResult(choices.First());
+    }
+
+    public Task<IReadOnlyList<T>> PromptForSelectionsAsync<T>(string promptText, IEnumerable<T> choices, Func<T, string> choiceFormatter, CancellationToken cancellationToken) where T : notnull
+    {
+        PromptForSelectionsAsyncCalled?.SetResult();
+
+        if (!choices.Any())
+        {
+            throw new InvalidOperationException($"No items available for selection: {promptText}");
+        }
+
+        return Task.FromResult<IReadOnlyList<T>>(choices.ToList());
     }
 
     public Task<bool> ConfirmAsync(string promptText, bool defaultValue = true, CancellationToken cancellationToken = default)
@@ -239,6 +256,14 @@ internal sealed class TestExtensionBackchannel : IExtensionBackchannel
         DisplayPlainTextAsyncCalled?.SetResult();
         return DisplayPlainTextAsyncCallback != null
             ? DisplayPlainTextAsyncCallback.Invoke(text)
+            : Task.CompletedTask;
+    }
+
+    public Task WriteDebugSessionMessageAsync(string message, bool stdout, string? textStyle, CancellationToken cancellationToken)
+    {
+        WriteDebugSessionMessageAsyncCalled?.SetResult();
+        return WriteDebugSessionMessageAsyncCallback != null
+            ? WriteDebugSessionMessageAsyncCallback.Invoke(message, stdout, textStyle)
             : Task.CompletedTask;
     }
 }

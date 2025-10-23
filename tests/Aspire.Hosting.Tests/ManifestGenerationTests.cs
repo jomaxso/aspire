@@ -380,7 +380,18 @@ public class ManifestGenerationTests
                     "HTTP_PORTS": "{integrationservicea.bindings.http.targetPort}",
                     "SKIP_RESOURCES": "None",
                     "ConnectionStrings__redis": "{redis.connectionString}",
-                    "ConnectionStrings__postgresdb": "{postgresdb.connectionString}"
+                    "REDIS_HOST": "{redis.bindings.tcp.host}",
+                    "REDIS_PORT": "{redis.bindings.tcp.port}",
+                    "REDIS_PASSWORD": "{redis-password.value}",
+                    "REDIS_URI": "redis://:{redis-password-uri-encoded.value}@{redis.bindings.tcp.host}:{redis.bindings.tcp.port}",
+                    "ConnectionStrings__postgresdb": "{postgresdb.connectionString}",
+                    "POSTGRESDB_HOST": "{postgres.bindings.tcp.host}",
+                    "POSTGRESDB_PORT": "{postgres.bindings.tcp.port}",
+                    "POSTGRESDB_USERNAME": "postgres",
+                    "POSTGRESDB_PASSWORD": "{postgres-password.value}",
+                    "POSTGRESDB_URI": "postgresql://postgres:{postgres-password.value}@{postgres.bindings.tcp.host}:{postgres.bindings.tcp.port}/postgresdb",
+                    "POSTGRESDB_JDBCCONNECTIONSTRING": "jdbc:postgresql://{postgres.bindings.tcp.host}:{postgres.bindings.tcp.port}/postgresdb",
+                    "POSTGRESDB_DATABASE": "postgresdb"
                   },
                   "bindings": {
                     "http": {
@@ -456,6 +467,11 @@ public class ManifestGenerationTests
                     }
                   }
                 },
+                "redis-password-uri-encoded": {
+                  "type": "annotated.string",
+                  "value": "{redis-password.value}",
+                  "filter": "uri"
+                },
                 "postgres-password": {
                   "type": "parameter.v0",
                   "value": "{postgres-password.inputs.value}",
@@ -470,6 +486,11 @@ public class ManifestGenerationTests
                       }
                     }
                   }
+                },
+                "postgres-password-uri-encoded": {
+                  "type": "annotated.string",
+                  "value": "{postgres-password.value}",
+                  "filter": "uri"
                 }
               }
             }

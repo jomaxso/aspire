@@ -1,6 +1,7 @@
 // Licensed to the .NET Foundation under one or more agreements.
 // The .NET Foundation licenses this file to you under the MIT license.
 
+using System.CommandLine;
 using Aspire.Cli.Configuration;
 using Aspire.Cli.DotNet;
 using Aspire.Cli.Interaction;
@@ -33,8 +34,8 @@ internal sealed class PublishCommand : PublishCommandBase
 {
     private readonly IPublishCommandPrompter _prompter;
 
-    public PublishCommand(IDotNetCliRunner runner, IInteractionService interactionService, IProjectLocator projectLocator, IPublishCommandPrompter prompter, AspireCliTelemetry telemetry, IDotNetSdkInstaller sdkInstaller, IFeatures features, ICliUpdateNotifier updateNotifier, CliExecutionContext executionContext)
-        : base("publish", PublishCommandStrings.Description, runner, interactionService, projectLocator, telemetry, sdkInstaller, features, updateNotifier, executionContext)
+    public PublishCommand(IDotNetCliRunner runner, IInteractionService interactionService, IProjectLocator projectLocator, IPublishCommandPrompter prompter, AspireCliTelemetry telemetry, IDotNetSdkInstaller sdkInstaller, IFeatures features, ICliUpdateNotifier updateNotifier, CliExecutionContext executionContext, ICliHostEnvironment hostEnvironment)
+        : base("publish", PublishCommandStrings.Description, runner, interactionService, projectLocator, telemetry, sdkInstaller, features, updateNotifier, executionContext, hostEnvironment)
     {
         ArgumentNullException.ThrowIfNull(prompter);
         _prompter = prompter;
@@ -44,7 +45,7 @@ internal sealed class PublishCommand : PublishCommandBase
     protected override string OperationFailedPrefix => PublishCommandStrings.OperationFailedPrefix;
     protected override string GetOutputPathDescription() => PublishCommandStrings.OutputPathArgumentDescription;
 
-    protected override string[] GetRunArguments(string? fullyQualifiedOutputPath, string[] unmatchedTokens)
+    protected override string[] GetRunArguments(string? fullyQualifiedOutputPath, string[] unmatchedTokens, ParseResult parseResult)
     {
         var baseArgs = new List<string> { "--operation", "publish", "--publisher", "default" };
 
@@ -53,6 +54,20 @@ internal sealed class PublishCommand : PublishCommandBase
             : Path.Combine(Environment.CurrentDirectory, "aspire-output");
 
         baseArgs.AddRange(["--output-path", targetPath]);
+
+        // Add --log-level and --envionment flags if specified
+        var logLevel = parseResult.GetValue(_logLevelOption);
+
+        if (!string.IsNullOrEmpty(logLevel))
+        {
+            baseArgs.AddRange(["--log-level", logLevel!]);
+        }
+
+        var environment = parseResult.GetValue(_environmentOption);
+        if (!string.IsNullOrEmpty(environment))
+        {
+            baseArgs.AddRange(["--environment", environment!]);
+        }
 
         baseArgs.AddRange(unmatchedTokens);
 
