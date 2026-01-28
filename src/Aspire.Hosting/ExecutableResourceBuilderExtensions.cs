@@ -26,6 +26,7 @@ public static class ExecutableResourceBuilderExtensions
     /// <para/>
     /// To run an executable file that's in the current directory, specify the full path or use the relative path <c>./</c> to represent the current directory.
     /// </remarks>
+    [AspireExport("addExecutable", Description = "Adds an executable resource")]
     public static IResourceBuilder<ExecutableResource> AddExecutable(this IDistributedApplicationBuilder builder, [ResourceName] string name, string command, string workingDirectory, params string[]? args)
     {
         ArgumentNullException.ThrowIfNull(builder);
@@ -125,6 +126,10 @@ public static class ExecutableResourceBuilderExtensions
         // This makes the method idempotent - multiple calls won't cause errors.
         if (builder.ApplicationBuilder.TryCreateResourceBuilder<ExecutableContainerResource>(builder.Resource.Name, out var existingBuilder))
         {
+            // Arguments to the executable often contain physical paths that are not valid in the container
+            // Clear them out so that the container can be set up with the correct arguments
+            existingBuilder.WithArgs(c => c.Args.Clear());
+
             // Resource has already been converted, just invoke the configure callback if provided
             configure?.Invoke(existingBuilder);
             return builder;
@@ -164,6 +169,7 @@ public static class ExecutableResourceBuilderExtensions
     /// <param name="builder">Builder for the executable resource.</param>
     /// <param name="command">Command.</param>
     /// <returns>The <see cref="IResourceBuilder{T}"/>.</returns>
+    [AspireExport("withExecutableCommand", Description = "Sets the executable command")]
     public static IResourceBuilder<T> WithCommand<T>(this IResourceBuilder<T> builder, string command) where T : ExecutableResource
     {
         ArgumentException.ThrowIfNullOrEmpty(command);
@@ -193,6 +199,7 @@ public static class ExecutableResourceBuilderExtensions
     /// <param name="builder">Builder for the executable resource.</param>
     /// <param name="workingDirectory">Working directory.</param>
     /// <returns>The <see cref="IResourceBuilder{T}"/>.</returns>
+    [AspireExport("withWorkingDirectory", Description = "Sets the executable working directory")]
     public static IResourceBuilder<T> WithWorkingDirectory<T>(this IResourceBuilder<T> builder, string workingDirectory) where T : ExecutableResource
     {
         ArgumentNullException.ThrowIfNull(workingDirectory);
@@ -205,24 +212,6 @@ public static class ExecutableResourceBuilderExtensions
         }
 
         throw new InvalidOperationException($"The resource '{builder.Resource.Name}' is missing the ExecutableAnnotation");
-    }
-
-    /// <summary>
-    /// Adds a <see cref="ExecutableCertificateTrustCallbackAnnotation"/> to the resource annotations to associate a callback that
-    /// is invoked when an executable resource needs to configure itself for custom certificate trust. This is only supported in run mode;
-    /// certificate trust customization is not supported in publish or deploy.
-    /// </summary>
-    /// <typeparam name="TResource">The type of the resource.</typeparam>
-    /// <param name="builder">The resource builder.</param>
-    /// <param name="callback">The callback to invoke when a resource needs to configure itself for custom certificate trust.</param>
-    /// <returns>The updated resource builder.</returns>
-    public static IResourceBuilder<TResource> WithExecutableCertificateTrustCallback<TResource>(this IResourceBuilder<TResource> builder, Func<ExecutableCertificateTrustCallbackAnnotationContext, Task> callback)
-        where TResource : ExecutableResource
-    {
-        ArgumentNullException.ThrowIfNull(builder);
-        ArgumentNullException.ThrowIfNull(callback);
-
-        return builder.WithAnnotation(new ExecutableCertificateTrustCallbackAnnotation(callback), ResourceAnnotationMutationBehavior.Replace);
     }
 
     // Allows us to mirror annotations from ExecutableResource to ContainerResource

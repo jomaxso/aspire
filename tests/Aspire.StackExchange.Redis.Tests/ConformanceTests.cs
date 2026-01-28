@@ -19,7 +19,7 @@ public class ConformanceTests : ConformanceTests<IConnectionMultiplexer, StackEx
 
     protected override ServiceLifetime ServiceLifetime => ServiceLifetime.Singleton;
 
-    protected override bool CanConnectToServer => RequiresDockerAttribute.IsSupported;
+    protected override bool CanConnectToServer => RequiresFeatureAttribute.IsFeatureSupported(TestFeature.Docker);
 
     protected override bool SupportsKeyedRegistrations => true;
 
@@ -59,14 +59,14 @@ public class ConformanceTests : ConformanceTests<IConnectionMultiplexer, StackEx
             ("""{"Aspire": { "StackExchange": { "Redis":{ "ConfigurationOptions": { "HeartbeatInterval": "3S"}}}}}""", "The string value is not a match for the indicated regular expression")
         };
 
-    public ConformanceTests(RedisContainerFixture containerFixture)
+    public ConformanceTests(RedisContainerFixture containerFixture, ITestOutputHelper? output = null) : base(output)
     {
         _containerFixture = containerFixture;
     }
 
     protected override void PopulateConfiguration(ConfigurationManager configuration, string? key = null)
     {
-        string connectionString = RequiresDockerAttribute.IsSupported
+        string connectionString = RequiresFeatureAttribute.IsFeatureSupported(TestFeature.Docker)
                                     ? _containerFixture.GetConnectionString()
                                     : "localhost";
         configuration.AddInMemoryCollection([

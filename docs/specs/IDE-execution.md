@@ -1,7 +1,7 @@
-# Running .NET Aspire applications inside an integrated developer environment (IDE)
+# Running Aspire applications inside an integrated developer environment (IDE)
 
 ## Application host, DCP, and IDE
-When .NET Aspire application host program is run, it does not launch application service programs or supporting emulators/containers directly. Instead, the application host relies on another program ("app orchestrator") called `DCP`.
+When Aspire application host program is run, it does not launch application service programs or supporting emulators/containers directly. Instead, the application host relies on another program ("app orchestrator") called `DCP`.
 
 When Visual Studio (or another IDE) starts the Aspire application host, Aspire-specific application model is created from user code in app host project. This model is then converted to another, language-agnostic model that DCP understands, and is submitted by app host to DCP for execution. The models are quite similar: for example, Aspire project (application services) are modeled as `Executable` objects on DCP side; containers become `Container` objects in DCP world.
 
@@ -215,8 +215,10 @@ Python launch configuration contains details for launching python scripts.
 | Property | Description | Required? |
 |----------------|--------|-------|
 | `type` | Launch configuration type indicator; must be `python`.  | Required |
-| `program_path` | Path to the python startup file. | Required |
+| `program_path` | Path to the python startup file, or if `module` is specified a path to the working directory for the app. | Required |
 | `mode` | Specifies the launch mode. Currently supported modes are `Debug` (run the project under the debugger) and `NoDebug` (run the project without debugging). | Optional, defaults to `Debug`. |
+| `interpreter_path` | Path to the python interpreter to use. If omitted, the global python installation will be used. | Optional |
+| `module` | The name of the module to execute, equivalent to python -m. | Optional |
 
 ## Run session change notifications
 

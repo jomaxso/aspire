@@ -5,7 +5,6 @@ using Aspire.TestUtilities;
 using Aspire.Components.ConformanceTests;
 using Aspire.Hosting.MySql;
 using Aspire.MySqlConnector.Tests;
-using Microsoft.DotNet.RemoteExecutor;
 using Microsoft.EntityFrameworkCore.Internal;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
@@ -45,7 +44,7 @@ public class ConformanceTests : ConformanceTests<TestDbContext, PomeloEntityFram
         "MySqlConnector.MySqlDataSource",
     };
 
-    protected override bool CanConnectToServer => RequiresDockerAttribute.IsSupported;
+    protected override bool CanConnectToServer => RequiresFeatureAttribute.IsFeatureSupported(TestFeature.Docker);
 
     protected override string ValidJsonConfig => """
         {
@@ -72,10 +71,10 @@ public class ConformanceTests : ConformanceTests<TestDbContext, PomeloEntityFram
             ("""{"Aspire": { "Pomelo": { "EntityFrameworkCore":{ "MySql": { "DisableMetrics": "true"}}}}}""", "Value is \"string\" but should be \"boolean\""),
         };
 
-    public ConformanceTests(MySqlContainerFixture? containerFixture)
+    public ConformanceTests(MySqlContainerFixture? containerFixture, ITestOutputHelper? output = null) : base(output)
     {
         _containerFixture = containerFixture;
-        ConnectionString = (_containerFixture is not null && RequiresDockerAttribute.IsSupported)
+        ConnectionString = (_containerFixture is not null && RequiresFeatureAttribute.IsFeatureSupported(TestFeature.Docker))
                                         ? _containerFixture.GetConnectionString()
                                         : "Server=localhost;User ID=root;Password=password;Database=test_aspire_mysql";
     }
@@ -128,10 +127,11 @@ public class ConformanceTests : ConformanceTests<TestDbContext, PomeloEntityFram
     }
 
     [Fact]
-    [RequiresDocker]
+    [RequiresFeature(TestFeature.Docker)]
     public void TracingEnablesTheRightActivitySource()
-        => RemoteExecutor.Invoke(static connectionStringToUse => RunWithConnectionString(connectionStringToUse, obj => obj.ActivitySourceTest(key: null)),
-                                 ConnectionString).Dispose();
+        => RemoteInvokeWithLogging(static connectionStringToUse =>
+            RunWithConnectionString(connectionStringToUse, obj => obj.ActivitySourceTest(key: null)),
+            ConnectionString, Output);
 
     private static void RunWithConnectionString(string connectionString, Action<ConformanceTests> test)
         => test(new ConformanceTests(null) { ConnectionString = connectionString });

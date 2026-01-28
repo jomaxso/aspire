@@ -33,12 +33,12 @@ public class OutputCacheConformanceTests : ConformanceTests
         }
     }
 
-    public OutputCacheConformanceTests(RedisContainerFixture containerFixture) : base(containerFixture)
+    public OutputCacheConformanceTests(RedisContainerFixture containerFixture, ITestOutputHelper? output = null) : base(containerFixture, output)
     {
     }
 
     [Fact]
-    [RequiresDocker]
+    [RequiresFeature(TestFeature.Docker)]
     public void WorksWithOpenTelemetryTracing()
     {
         RemoteExecutor.Invoke(async (connectionString) =>

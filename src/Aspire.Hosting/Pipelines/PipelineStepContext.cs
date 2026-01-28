@@ -14,7 +14,7 @@ namespace Aspire.Hosting.Pipelines;
 /// This context combines the shared pipeline context with a step-specific publishing step,
 /// allowing each step to track its own tasks and completion state independently.
 /// </remarks>
-[Experimental("ASPIREPUBLISHERS001", UrlFormat = "https://aka.ms/aspire/diagnostics/{0}")]
+[Experimental("ASPIREPIPELINES001", UrlFormat = "https://aka.ms/aspire/diagnostics/{0}")]
 public sealed class PipelineStepContext
 {
     /// <summary>
@@ -48,46 +48,10 @@ public sealed class PipelineStepContext
     /// <summary>
     /// Gets the logger for pipeline operations that writes to both the pipeline logger and the step logger.
     /// </summary>
-    public ILogger Logger => field ??= new StepLogger(ReportingStep);
+    public ILogger Logger => PipelineContext.Logger;
 
     /// <summary>
     /// Gets the cancellation token for the pipeline operation.
     /// </summary>
     public CancellationToken CancellationToken => PipelineContext.CancellationToken;
-
-    /// <summary>
-    /// Gets the output path for deployment artifacts.
-    /// </summary>
-    public string? OutputPath => PipelineContext.OutputPath;
-}
-
-/// <summary>
-/// A logger that writes to the step logger.
-/// </summary>
-[Experimental("ASPIREPUBLISHERS001", UrlFormat = "https://aka.ms/aspire/diagnostics/{0}")]
-internal sealed class StepLogger(IReportingStep step) : ILogger
-{
-    private readonly IReportingStep _step = step;
-
-    public IDisposable? BeginScope<TState>(TState state) where TState : notnull
-    {
-        return null;
-    }
-
-    public bool IsEnabled(LogLevel logLevel)
-    {
-        return true;
-    }
-
-    public void Log<TState>(LogLevel logLevel, EventId eventId, TState state, Exception? exception, Func<TState, Exception?, string> formatter)
-    {
-        // Also log to the step logger (for publishing output display)
-        var message = formatter(state, exception);
-        if (exception != null)
-        {
-            message = $"{message} {exception}";
-        }
-
-        _step.Log(logLevel, message, enableMarkdown: false);
-    }
 }

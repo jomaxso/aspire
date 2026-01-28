@@ -9,47 +9,60 @@ namespace Aspire.Hosting.GitHub;
 
 public partial class GitHubModel
 {
+    public static partial class AI21Labs
+    {
+        /// <summary>
+        /// A 52B parameters (12B active) multilingual model, offering a 256K long context window, function calling, structured output, and grounded generation.
+        /// </summary>
+        [Obsolete("This model has been removed from GitHub Models.")]
+        [EditorBrowsable(EditorBrowsableState.Never)]
+        public static readonly GitHubModel AI21Jamba15Mini = new() { Id = "ai21-labs/ai21-jamba-1.5-mini" };
+    }
+
+    public static partial class Cohere
+    {
+        /// <summary>
+        /// Cohere Embed English is the market's leading text representation model used for semantic search, retrieval-augmented generation (RAG), classification, and clustering.
+        /// </summary>
+        [Obsolete("This model has been removed from GitHub Models.")]
+        [EditorBrowsable(EditorBrowsableState.Never)]
+        public static readonly GitHubModel CohereEmbedV3English = new() { Id = "cohere/cohere-embed-v3-english" };
+
+        /// <summary>
+        /// Cohere Embed Multilingual is the market's leading text representation model used for semantic search, retrieval-augmented generation (RAG), classification, and clustering.
+        /// </summary>
+        [Obsolete("This model has been removed from GitHub Models.")]
+        [EditorBrowsable(EditorBrowsableState.Never)]
+        public static readonly GitHubModel CohereEmbedV3Multilingual = new() { Id = "cohere/cohere-embed-v3-multilingual" };
+    }
+
+    /// <summary>
+    /// Models published by Core42.
+    /// </summary>
     public static partial class Core42
     {
-        /// <inheritdoc cref="Jais30bChat"/>
-        [Obsolete("Use Jais30bChat instead.")]
+        /// <summary>
+        /// JAIS 30b Chat is an auto-regressive bilingual LLM for Arabic &amp; English with state-of-the-art capabilities in Arabic.
+        /// </summary>
+        [Obsolete("This model has been removed from GitHub Models.")]
         [EditorBrowsable(EditorBrowsableState.Never)]
-        public static readonly GitHubModel JAIS30bChat = new() { Id = "core42/jais-30b-chat" };
+        public static readonly GitHubModel Jais30bChat = new() { Id = "core42/jais-30b-chat" };
     }
 
-    public static partial class Microsoft
+    public static partial class MistralAI
     {
-        /// <inheritdoc cref="MaiDSR1"/>
-        [Obsolete("Use MaiDSR1 instead.")]
+        /// <summary>
+        /// Mistral Large 24.11 offers enhanced system prompts, advanced reasoning and function calling capabilities.
+        /// </summary>
+        [Obsolete("This model has been removed from GitHub Models.")]
         [EditorBrowsable(EditorBrowsableState.Never)]
-        public static readonly GitHubModel MAIDSR1 = new() { Id = "microsoft/mai-ds-r1" };
-    }
+        public static readonly GitHubModel MistralLarge2411 = new() { Id = "mistral-ai/mistral-large-2411" };
 
-    public static partial class OpenAI
-    {
-        /// <inheritdoc cref="OpenAIGpt41"/>
-        [Obsolete("Use OpenAIGpt41 instead.")]
+        /// <summary>
+        /// Mistral Nemo is a cutting-edge Language Model (LLM) boasting state-of-the-art reasoning, world knowledge, and coding capabilities within its size category.
+        /// </summary>
+        [Obsolete("This model has been removed from GitHub Models.")]
         [EditorBrowsable(EditorBrowsableState.Never)]
-        public static readonly GitHubModel OpenAIGPT41 = new() { Id = "openai/gpt-4.1" };
-
-        /// <inheritdoc cref="OpenAIGpt41Mini"/>
-        [Obsolete("Use OpenAIGpt41Mini instead.")]
-        [EditorBrowsable(EditorBrowsableState.Never)]
-        public static readonly GitHubModel OpenAIGPT41Mini = new() { Id = "openai/gpt-4.1-mini" };
-
-        /// <inheritdoc cref="OpenAIGpt41Nano"/>
-        [Obsolete("Use OpenAIGpt41Nano instead.")]
-        [EditorBrowsable(EditorBrowsableState.Never)]
-        public static readonly GitHubModel OpenAIGPT41Nano = new() { Id = "openai/gpt-4.1-nano" };
-
-        /// <inheritdoc cref="OpenAIGpt4o"/>
-        [Obsolete("Use OpenAIGpt4o instead.")]
-        [EditorBrowsable(EditorBrowsableState.Never)]
-        public static readonly GitHubModel OpenAIGPT4o = new() { Id = "openai/gpt-4o" };
-
-        /// <inheritdoc cref="OpenAIGpt4oMini"/>
-        [Obsolete("Use OpenAIGpt4oMini instead.")]
-        [EditorBrowsable(EditorBrowsableState.Never)]
-        public static readonly GitHubModel OpenAIGPT4oMini = new() { Id = "openai/gpt-4o-mini" };
+        public static readonly GitHubModel MistralNemo = new() { Id = "mistral-ai/mistral-nemo" };
     }
 }

@@ -8,13 +8,14 @@ using Microsoft.AspNetCore.InternalTesting;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Diagnostics.HealthChecks;
 using Microsoft.Extensions.Logging;
+using System.Text.RegularExpressions;
 
 namespace Aspire.Hosting.Tests;
 
 public class WaitForTests(ITestOutputHelper testOutputHelper)
 {
     [Fact]
-    [RequiresDocker]
+    [RequiresFeature(TestFeature.Docker)]
     public async Task ResourceThatFailsToStartDueToExceptionDoesNotCauseStartAsyncToThrow()
     {
         using var builder = TestDistributedApplicationBuilder.Create().WithTestAndResourceLogging(testOutputHelper);
@@ -80,7 +81,7 @@ public class WaitForTests(ITestOutputHelper testOutputHelper)
     }
 
     [Fact]
-    [RequiresDocker]
+    [RequiresFeature(TestFeature.Docker)]
     public async Task WaitingForParameterResourceCompletesImmediately()
     {
         using var builder = TestDistributedApplicationBuilder.Create(testOutputHelper);
@@ -118,7 +119,7 @@ public class WaitForTests(ITestOutputHelper testOutputHelper)
     }
 
     [Fact]
-    [RequiresDocker]
+    [RequiresFeature(TestFeature.Docker)]
     public async Task WaitingForConnectionStringResourceWaitsForReferencedResources()
     {
         using var builder = TestDistributedApplicationBuilder.Create(testOutputHelper);
@@ -148,7 +149,7 @@ public class WaitForTests(ITestOutputHelper testOutputHelper)
     }
 
     [Fact]
-    [RequiresDocker]
+    [RequiresFeature(TestFeature.Docker)]
     public async Task EnsureDependentResourceMovesIntoWaitingState()
     {
         using var builder = TestDistributedApplicationBuilder.Create().WithTestAndResourceLogging(testOutputHelper);
@@ -196,7 +197,7 @@ public class WaitForTests(ITestOutputHelper testOutputHelper)
     [InlineData(nameof(KnownResourceStates.FailedToStart))]
     [InlineData(nameof(KnownResourceStates.RuntimeUnhealthy))]
     [InlineData(nameof(KnownResourceStates.Finished))]
-    [RequiresDocker]
+    [RequiresFeature(TestFeature.Docker)]
     public async Task WaitForBehaviorStopOnResourceUnavailable(string status)
     {
         using var builder = TestDistributedApplicationBuilder.Create().WithTestAndResourceLogging(testOutputHelper);
@@ -226,7 +227,7 @@ public class WaitForTests(ITestOutputHelper testOutputHelper)
     }
 
    [Fact]
-   [RequiresDocker]
+   [RequiresFeature(TestFeature.Docker)]
    public async Task WhenWaitBehaviorIsStopOnResourceUnavailableWaitForResourceHealthyAsyncShouldThrowWhenResourceFailsToStart()
    {
       using var builder = TestDistributedApplicationBuilder.Create().WithTestAndResourceLogging(testOutputHelper);
@@ -250,7 +251,7 @@ public class WaitForTests(ITestOutputHelper testOutputHelper)
    }
 
    [Fact]
-   [RequiresDocker]
+   [RequiresFeature(TestFeature.Docker)]
    public async Task WhenWaitBehaviorIsWaitOnResourceUnavailableWaitForResourceHealthyAsyncShouldThrowWhenResourceFailsToStart()
    {
       using var builder = TestDistributedApplicationBuilder.Create().WithTestAndResourceLogging(testOutputHelper);
@@ -274,7 +275,7 @@ public class WaitForTests(ITestOutputHelper testOutputHelper)
    }
 
     [Theory]
-    [RequiresDocker]
+    [RequiresFeature(TestFeature.Docker)]
     [InlineData(WaitBehavior.WaitOnResourceUnavailable, typeof(TimeoutException), "The operation has timed out.")]
     [InlineData(WaitBehavior.StopOnResourceUnavailable, typeof(DistributedApplicationException), "Stopped waiting for resource 'redis' to become healthy because it failed to start.")]
     public async Task WhenWaitBehaviorIsMissingWaitForResourceHealthyAsyncShouldUseDefaultWaitBehavior(WaitBehavior defaultWaitBehavior, Type exceptionType, string exceptionMessage)
@@ -307,7 +308,7 @@ public class WaitForTests(ITestOutputHelper testOutputHelper)
     [InlineData(nameof(KnownResourceStates.FailedToStart))]
     [InlineData(nameof(KnownResourceStates.RuntimeUnhealthy))]
     [InlineData(nameof(KnownResourceStates.Finished))]
-    [RequiresDocker]
+    [RequiresFeature(TestFeature.Docker)]
     public async Task WaitForBehaviorStopOnDependencyIsDefaultWithNoDashboardFailure(string status)
     {
         using var builder = TestDistributedApplicationBuilder.Create().WithTestAndResourceLogging(testOutputHelper);
@@ -341,7 +342,7 @@ public class WaitForTests(ITestOutputHelper testOutputHelper)
     [InlineData(nameof(KnownResourceStates.FailedToStart))]
     [InlineData(nameof(KnownResourceStates.RuntimeUnhealthy))]
     [InlineData(nameof(KnownResourceStates.Finished))]
-    [RequiresDocker]
+    [RequiresFeature(TestFeature.Docker)]
     public async Task WaitForBehaviorWaitOnResourceUnavailable(string status)
     {
         using var builder = TestDistributedApplicationBuilder.Create().WithTestAndResourceLogging(testOutputHelper);
@@ -383,7 +384,7 @@ public class WaitForTests(ITestOutputHelper testOutputHelper)
     [InlineData(nameof(KnownResourceStates.FailedToStart))]
     [InlineData(nameof(KnownResourceStates.RuntimeUnhealthy))]
     [InlineData(nameof(KnownResourceStates.Finished))]
-    [RequiresDocker]
+    [RequiresFeature(TestFeature.Docker)]
     public async Task WaitForBehaviorWaitOnResourceUnavailableViaOptions(string status)
     {
         using var builder = TestDistributedApplicationBuilder.Create().WithTestAndResourceLogging(testOutputHelper);
@@ -426,7 +427,7 @@ public class WaitForTests(ITestOutputHelper testOutputHelper)
     }
 
     [Fact]
-    [RequiresDocker]
+    [RequiresFeature(TestFeature.Docker)]
     public async Task WaitForCompletionWaitsForTerminalStateOfDependencyResource()
     {
         using var builder = TestDistributedApplicationBuilder.Create().WithTestAndResourceLogging(testOutputHelper);
@@ -473,7 +474,7 @@ public class WaitForTests(ITestOutputHelper testOutputHelper)
     }
 
     [Fact]
-    [RequiresDocker]
+    [RequiresFeature(TestFeature.Docker)]
     public async Task WaitForThrowsIfResourceMovesToTerminalStateBeforeRunning()
     {
         using var builder = TestDistributedApplicationBuilder.Create().WithTestAndResourceLogging(testOutputHelper);
@@ -520,7 +521,7 @@ public class WaitForTests(ITestOutputHelper testOutputHelper)
     }
 
     [Fact]
-    [RequiresDocker]
+    [RequiresFeature(TestFeature.Docker)]
     public async Task WaitForObservedResultOfResourceReadyEvent()
     {
         using var builder = TestDistributedApplicationBuilder.Create().WithTestAndResourceLogging(testOutputHelper);
@@ -576,13 +577,13 @@ public class WaitForTests(ITestOutputHelper testOutputHelper)
         var logs = collector.GetSnapshot();
 
         // Just looking for a common message in Docker build output.
-        Assert.Contains(logs, log => log.Message.Contains("The resource ready event failed!"));
+        Assert.Contains(logs, log => Regex.IsMatch(log.Message, @"(?i).*resource.*nginx.*failed.*"));
 
         await app.StopAsync();
     }
 
     [Fact]
-    [RequiresDocker]
+    [RequiresFeature(TestFeature.Docker)]
     public async Task EnsureDependencyResourceThatReturnsNonMatchingExitCodeResultsInDependentResourceFailingToStart()
     {
         using var builder = TestDistributedApplicationBuilder.Create().WithTestAndResourceLogging(testOutputHelper);
@@ -628,7 +629,7 @@ public class WaitForTests(ITestOutputHelper testOutputHelper)
     }
 
     [Fact]
-    [RequiresDocker]
+    [RequiresFeature(TestFeature.Docker)]
     public async Task DependencyWithGreaterThan1ReplicaAnnotationWaitsForAll()
     {
         using var builder = TestDistributedApplicationBuilder.Create().WithTestAndResourceLogging(testOutputHelper);
@@ -681,7 +682,7 @@ public class WaitForTests(ITestOutputHelper testOutputHelper)
     }
 
     [Fact]
-    [RequiresDocker]
+    [RequiresFeature(TestFeature.Docker)]
     public async Task DependencyWithGreaterThan1ReplicaAnnotationWaitsForAllToComplete()
     {
         using var builder = TestDistributedApplicationBuilder.Create().WithTestAndResourceLogging(testOutputHelper);
@@ -734,7 +735,7 @@ public class WaitForTests(ITestOutputHelper testOutputHelper)
     }
 
     [Fact]
-    [RequiresDocker]
+    [RequiresFeature(TestFeature.Docker)]
     public async Task WaitForCompletionSucceedsIfDependentResourceEntersTerminalStateWithoutAnExitCode()
     {
         using var builder = TestDistributedApplicationBuilder.Create().WithTestAndResourceLogging(testOutputHelper);
@@ -844,7 +845,7 @@ public class WaitForTests(ITestOutputHelper testOutputHelper)
     }
 
     [Fact]
-    [RequiresDocker]
+    [RequiresFeature(TestFeature.Docker)]
     public async Task WaitForStartOnlyWaitsForRunningState()
     {
         using var builder = TestDistributedApplicationBuilder.Create().WithTestAndResourceLogging(testOutputHelper);

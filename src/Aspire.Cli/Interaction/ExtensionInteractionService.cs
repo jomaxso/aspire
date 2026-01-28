@@ -299,6 +299,13 @@ internal class ExtensionInteractionService : IExtensionInteractionService
         _consoleInteractionService.DisplayPlainText(text);
     }
 
+    public void DisplayRawText(string text)
+    {
+        var result = _extensionTaskChannel.Writer.TryWrite(() => Backchannel.DisplayPlainTextAsync(text, _cancellationToken));
+        Debug.Assert(result);
+        _consoleInteractionService.DisplayRawText(text);
+    }
+
     public void DisplayMarkdown(string markdown)
     {
         // Send raw markdown to extension (it can handle markdown natively)
@@ -308,9 +315,17 @@ internal class ExtensionInteractionService : IExtensionInteractionService
         _consoleInteractionService.DisplayMarkdown(markdown);
     }
 
-    public void DisplayVersionUpdateNotification(string newerVersion)
+    public void DisplayMarkupLine(string markup)
     {
-        _consoleInteractionService.DisplayVersionUpdateNotification(newerVersion);
+        // Strip markup for backchannel, display as-is to console
+        var result = _extensionTaskChannel.Writer.TryWrite(() => Backchannel.LogMessageAsync(LogLevel.Information, markup.RemoveSpectreFormatting(), _cancellationToken));
+        Debug.Assert(result);
+        _consoleInteractionService.DisplayMarkupLine(markup);
+    }
+
+    public void DisplayVersionUpdateNotification(string newerVersion, string? updateCommand = null)
+    {
+        _consoleInteractionService.DisplayVersionUpdateNotification(newerVersion, updateCommand);
     }
 
     public void LogMessage(LogLevel logLevel, string message)

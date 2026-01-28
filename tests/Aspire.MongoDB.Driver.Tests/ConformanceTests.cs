@@ -21,7 +21,7 @@ public class ConformanceTests : ConformanceTests<IMongoClient, MongoDBSettings>,
 
     protected override bool SupportsKeyedRegistrations => true;
 
-    protected override bool CanConnectToServer => RequiresDockerAttribute.IsSupported;
+    protected override bool CanConnectToServer => RequiresFeatureAttribute.IsFeatureSupported(TestFeature.Docker);
 
     protected override string? ConfigurationSectionName => "Aspire:MongoDB:Driver";
 
@@ -40,7 +40,7 @@ public class ConformanceTests : ConformanceTests<IMongoClient, MongoDBSettings>,
         }
         """;
 
-    public ConformanceTests(MongoDbContainerFixture containerFixture)
+    public ConformanceTests(MongoDbContainerFixture containerFixture, ITestOutputHelper? output = null) : base(output)
     {
         _containerFixture = containerFixture;
     }
@@ -72,7 +72,7 @@ public class ConformanceTests : ConformanceTests<IMongoClient, MongoDBSettings>,
 
     private string GetConnectionString()
     {
-        if (RequiresDockerAttribute.IsSupported)
+        if (RequiresFeatureAttribute.IsFeatureSupported(TestFeature.Docker))
         {
             var builder = new UriBuilder(_containerFixture.GetConnectionString());
             builder.Path = "test_db";

@@ -1,11 +1,11 @@
 #pragma warning disable ASPIREINTERACTION001 // Type is for evaluation purposes only and is subject to change or removal in future updates. Suppress this diagnostic to proceed.
-#pragma warning disable ASPIREPUBLISHERS001 // Type is for evaluation purposes only and is subject to change or removal in future updates. Suppress this diagnostic to proceed.
+#pragma warning disable ASPIREPIPELINES002 // Type is for evaluation purposes only and is subject to change or removal in future updates. Suppress this diagnostic to proceed.
 
 // Licensed to the .NET Foundation under one or more agreements.
 // The .NET Foundation licenses this file to you under the MIT license.
 
 using System.Text.RegularExpressions;
-using Aspire.Hosting.Publishing;
+using Aspire.Hosting.Pipelines;
 using Azure;
 using Azure.Core;
 using Azure.ResourceManager.Resources;
@@ -87,8 +87,6 @@ internal abstract partial class BaseProvisioningContextProvider(
         }
 
         var armClient = _armClientProvider.GetArmClient(credential, subscriptionId);
-
-        _logger.LogInformation("Getting default subscription and tenant...");
 
         var (subscriptionResource, tenantResource) = await armClient.GetSubscriptionAndTenantAsync(cancellationToken).ConfigureAwait(false);
 
@@ -271,6 +269,39 @@ internal abstract partial class BaseProvisioningContextProvider(
     protected async Task<(List<KeyValuePair<string, string>>? subscriptionOptions, bool fetchSucceeded)> TryGetSubscriptionsAsync(CancellationToken cancellationToken)
     {
         return await TryGetSubscriptionsAsync(_options.TenantId, cancellationToken).ConfigureAwait(false);
+    }
+
+    protected async Task<(List<(string Name, string Location)>? resourceGroupOptions, bool fetchSucceeded)> TryGetResourceGroupsWithLocationAsync(string subscriptionId, CancellationToken cancellationToken)
+    {
+        List<(string Name, string Location)>? resourceGroupOptions = null;
+
+        // SubscriptionId is always a GUID. Check if we have a valid GUID before trying to use it.
+        if (Guid.TryParse(subscriptionId, out _))
+        {
+            try
+            {
+                var credential = _tokenCredentialProvider.TokenCredential;
+                var armClient = _armClientProvider.GetArmClient(credential);
+                var availableResourceGroups = await armClient.GetAvailableResourceGroupsWithLocationAsync(subscriptionId, cancellationToken).ConfigureAwait(false);
+                var resourceGroupList = availableResourceGroups.ToList();
+
+                if (resourceGroupList.Count > 0)
+                {
+                    resourceGroupOptions = resourceGroupList;
+                    return (resourceGroupOptions, true);
+                }
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "Failed to enumerate available resource groups with locations.");
+            }
+        }
+        else
+        {
+            _logger.LogDebug("SubscriptionId '{SubscriptionId}' isn't a valid GUID. Skipping getting available resource groups from client.", subscriptionId);
+        }
+
+        return (resourceGroupOptions, false);
     }
 
     protected async Task<(List<KeyValuePair<string, string>> locationOptions, bool fetchSucceeded)> TryGetLocationsAsync(string subscriptionId, CancellationToken cancellationToken)

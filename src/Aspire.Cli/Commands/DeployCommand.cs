@@ -9,28 +9,23 @@ using Aspire.Cli.Projects;
 using Aspire.Cli.Resources;
 using Aspire.Cli.Telemetry;
 using Aspire.Cli.Utils;
+using Microsoft.Extensions.Logging;
+using Spectre.Console;
 
 namespace Aspire.Cli.Commands;
 
-internal sealed class DeployCommand : PublishCommandBase
+internal sealed class DeployCommand : PipelineCommandBase
 {
     private readonly Option<bool> _clearCacheOption;
-    private readonly Option<string?> _stepOption;
 
-    public DeployCommand(IDotNetCliRunner runner, IInteractionService interactionService, IProjectLocator projectLocator, AspireCliTelemetry telemetry, IDotNetSdkInstaller sdkInstaller, IFeatures features, ICliUpdateNotifier updateNotifier, CliExecutionContext executionContext, ICliHostEnvironment hostEnvironment)
-        : base("deploy", DeployCommandStrings.Description, runner, interactionService, projectLocator, telemetry, sdkInstaller, features, updateNotifier, executionContext, hostEnvironment)
+    public DeployCommand(IDotNetCliRunner runner, IInteractionService interactionService, IProjectLocator projectLocator, AspireCliTelemetry telemetry, IDotNetSdkInstaller sdkInstaller, IFeatures features, ICliUpdateNotifier updateNotifier, CliExecutionContext executionContext, ICliHostEnvironment hostEnvironment, IAppHostProjectFactory projectFactory, ILogger<DeployCommand> logger, IAnsiConsole ansiConsole)
+        : base("deploy", DeployCommandStrings.Description, runner, interactionService, projectLocator, telemetry, sdkInstaller, features, updateNotifier, executionContext, hostEnvironment, projectFactory, logger, ansiConsole)
     {
         _clearCacheOption = new Option<bool>("--clear-cache")
         {
             Description = "Clear the deployment cache associated with the current environment and do not save deployment state"
         };
         Options.Add(_clearCacheOption);
-
-        _stepOption = new Option<string?>("--step")
-        {
-            Description = "Run a specific deployment step and its dependencies"
-        };
-        Options.Add(_stepOption);
     }
 
     protected override string OperationCompletedPrefix => DeployCommandStrings.OperationCompletedPrefix;
@@ -39,14 +34,12 @@ internal sealed class DeployCommand : PublishCommandBase
 
     protected override string[] GetRunArguments(string? fullyQualifiedOutputPath, string[] unmatchedTokens, ParseResult parseResult)
     {
-        var baseArgs = new List<string> { "--operation", "publish", "--publisher", "default" };
+        var baseArgs = new List<string> { "--operation", "publish", "--step", "deploy" };
 
         if (fullyQualifiedOutputPath != null)
         {
             baseArgs.AddRange(["--output-path", fullyQualifiedOutputPath]);
         }
-
-        baseArgs.AddRange(["--deploy", "true"]);
 
         var clearCache = parseResult.GetValue(_clearCacheOption);
         if (clearCache)
@@ -55,23 +48,23 @@ internal sealed class DeployCommand : PublishCommandBase
         }
 
         // Add --log-level and --envionment flags if specified
-        var logLevel = parseResult.GetValue(_logLevelOption);
+        var logLevel = parseResult.GetValue(s_logLevelOption);
 
         if (!string.IsNullOrEmpty(logLevel))
         {
             baseArgs.AddRange(["--log-level", logLevel!]);
         }
 
-        var environment = parseResult.GetValue(_environmentOption);
+        var includeExceptionDetails = parseResult.GetValue(s_includeExceptionDetailsOption);
+        if (includeExceptionDetails)
+        {
+            baseArgs.AddRange(["--include-exception-details", "true"]);
+        }
+
+        var environment = parseResult.GetValue(s_environmentOption);
         if (!string.IsNullOrEmpty(environment))
         {
             baseArgs.AddRange(["--environment", environment!]);
-        }
-
-        var step = parseResult.GetValue(_stepOption);
-        if (step != null)
-        {
-            baseArgs.AddRange(["--step", step]);
         }
 
         baseArgs.AddRange(unmatchedTokens);
@@ -81,5 +74,8 @@ internal sealed class DeployCommand : PublishCommandBase
 
     protected override string GetCanceledMessage() => DeployCommandStrings.DeploymentCanceled;
 
-    protected override string GetProgressMessage() => PublishCommandStrings.GeneratingArtifacts;
+    protected override string GetProgressMessage(ParseResult parseResult)
+    {
+        return "Executing step deploy";
+    }
 }

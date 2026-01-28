@@ -16,7 +16,7 @@ At runtime the client integration will detect whether the connection string has 
 
 ### Install the package
 
-Install the .NET Aspire Azure Npgsql library with [NuGet](https://www.nuget.org):
+Install the Aspire Azure Npgsql library with [NuGet](https://www.nuget.org):
 
 ```dotnetcli
 dotnet add package Aspire.Azure.Npgsql
@@ -43,7 +43,7 @@ public ProductsController(NpgsqlDataSource dataSource)
 
 ## Configuration
 
-The .NET Aspire Azure Npgsql component provides multiple options to configure the database connection based on the requirements and conventions of your project.
+The Aspire Azure Npgsql component provides multiple options to configure the database connection based on the requirements and conventions of your project.
 
 ### Use a connection string
 
@@ -69,7 +69,7 @@ Note that the username and password will be automatically inferred from the cred
 
 ### Use configuration providers
 
-The .NET Aspire Azure Npgsql component supports [Microsoft.Extensions.Configuration](https://learn.microsoft.com/dotnet/api/microsoft.extensions.configuration). It loads the `AzureNpgsqlSettings` from configuration by using the `Aspire:Npgsql` key. Example `appsettings.json` that configures some of the options:
+The Aspire Azure Npgsql component supports [Microsoft.Extensions.Configuration](https://learn.microsoft.com/dotnet/api/microsoft.extensions.configuration). It loads the `AzureNpgsqlSettings` from configuration by using the `Aspire:Npgsql` key. Example `appsettings.json` that configures some of the options:
 
 ```json
 {
@@ -117,7 +117,7 @@ The `WithReference` method configures a connection in the `MyService` project na
 builder.AddAzureNpgsqlDataSource("postgresdb");
 ```
 
-This will also require your Azure environment to be configure by following [these instructions](https://learn.microsoft.com/dotnet/aspire/azure/local-provisioning#configuration).
+This will also require your Azure environment to be configure by following [these instructions](https://aspire.dev/integrations/cloud/azure/local-provisioning#configuration).
 
 ## Troubleshooting
 
@@ -134,6 +134,7 @@ builder.AddAzureNpgsqlDataSource("db", configureDataSourceBuilder:
 
 ## Additional documentation
 
+* https://aspire.dev/integrations/cloud/azure/azure-postgresql/
 * https://www.npgsql.org/doc/basic-usage.html
 * https://github.com/dotnet/aspire/tree/main/src/Components/README.md
 

@@ -4,7 +4,6 @@
 using System.Diagnostics;
 using Aspire.TestUtilities;
 using Aspire.Components.ConformanceTests;
-using Microsoft.DotNet.RemoteExecutor;
 using Microsoft.EntityFrameworkCore.Internal;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
@@ -42,7 +41,7 @@ public class ConformanceTests : ConformanceTests<TestDbContext, OracleEntityFram
         "Microsoft.EntityFrameworkCore.Migrations"
     };
 
-    protected override bool CanConnectToServer => RequiresDockerAttribute.IsSupported;
+    protected override bool CanConnectToServer => RequiresFeatureAttribute.IsFeatureSupported(TestFeature.Docker);
 
     protected override string ValidJsonConfig => """
         {
@@ -95,11 +94,11 @@ public class ConformanceTests : ConformanceTests<TestDbContext, OracleEntityFram
         }
     }
 
-    public ConformanceTests(OracleContainerFixture? containerFixture, ITestOutputHelper? testOutputHelper)
+    public ConformanceTests(OracleContainerFixture? containerFixture, ITestOutputHelper? testOutputHelper = null) : base(testOutputHelper)
     {
         _containerFixture = containerFixture;
         _testOutputHelper = testOutputHelper;
-        ConnectionString = (_containerFixture is not null && RequiresDockerAttribute.IsSupported)
+        ConnectionString = (_containerFixture is not null && RequiresFeatureAttribute.IsFeatureSupported(TestFeature.Docker))
                                         ? _containerFixture.GetConnectionString()
                                         : "Server=localhost;User ID=oracle;Password=oracle;Database=FREEPDB1";
     }
@@ -127,19 +126,21 @@ public class ConformanceTests : ConformanceTests<TestDbContext, OracleEntityFram
     }
 
     [Fact]
-    [RequiresDocker]
+    [RequiresFeature(TestFeature.Docker)]
     public void TracingEnablesTheRightActivitySource()
     {
-        RemoteExecutor.Invoke(static connectionStringToUse => RunWithConnectionString(connectionStringToUse, obj => obj.ActivitySourceTest(key: null)),
-                             ConnectionString).Dispose();
+        RemoteInvokeWithLogging(static connectionStringToUse =>
+            RunWithConnectionString(connectionStringToUse, obj => obj.ActivitySourceTest(key: null)),
+            ConnectionString, Output);
     }
 
     [Fact]
-    [RequiresDocker]
+    [RequiresFeature(TestFeature.Docker)]
     public void TracingHasSemanticConventions()
     {
-        RemoteExecutor.Invoke(static connectionStringToUse => RunWithConnectionString(connectionStringToUse, obj => obj.ActivitySemanticsTest()),
-                             ConnectionString).Dispose();
+        RemoteInvokeWithLogging(static connectionStringToUse =>
+            RunWithConnectionString(connectionStringToUse, obj => obj.ActivitySemanticsTest()),
+            ConnectionString, Output);
     }
 
     private void ActivitySemanticsTest()
@@ -180,5 +181,5 @@ public class ConformanceTests : ConformanceTests<TestDbContext, OracleEntityFram
     }
 
     private static void RunWithConnectionString(string connectionString, Action<ConformanceTests> test)
-    => test(new ConformanceTests(null, null) { ConnectionString = connectionString });
+        => test(new ConformanceTests(null, null) { ConnectionString = connectionString });
 }

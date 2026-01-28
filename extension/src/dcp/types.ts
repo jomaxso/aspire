@@ -1,4 +1,5 @@
 import * as vscode from 'vscode';
+import { AspireDebugSession } from '../debugger/AspireDebugSession';
 
 export interface ErrorResponse {
     error: ErrorDetails;
@@ -30,8 +31,13 @@ export function isProjectLaunchConfiguration(obj: any): obj is ProjectLaunchConf
 
 export interface PythonLaunchConfiguration extends ExecutableLaunchConfiguration {
     type: "python";
+
+    // legacy fields
+    project_path?: string;
     program_path?: string;
-    project_path?: string; // leftover from 9.5 usage of project path
+
+    module?: string;
+    interpreter_path?: string;
 }
 
 export function isPythonLaunchConfiguration(obj: any): obj is PythonLaunchConfiguration {
@@ -47,6 +53,13 @@ export interface RunSessionPayload {
     launch_configurations: ExecutableLaunchConfiguration[];
     env?: EnvVar[];
     args?: string[];
+}
+
+export interface DebugLaunchSettings {
+    env?: { [key: string]: string };
+    args?: string[];
+    launchProfile?: string;
+    disableLaunchProfile?: boolean;
 }
 
 export interface DcpServerConnectionInfo {
@@ -91,6 +104,7 @@ export interface LaunchOptions {
     runId: string;
     debugSessionId: string;
     isApphost: boolean;
+    debugSession: AspireDebugSession;
 };
 
 export interface AspireResourceDebugSession {
@@ -111,7 +125,7 @@ export interface AspireExtendedDebugConfiguration extends vscode.DebugConfigurat
 }
 
 interface AspireDebuggersConfiguration {
-    [key: string]: Record<string, any>;
+    [key: string]: DebugLaunchSettings;
 }
 
 export interface RunSessionInfo {

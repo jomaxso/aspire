@@ -331,8 +331,8 @@ public class AddCommandTests(ITestOutputHelper outputHelper)
         Assert.Equal(0, exitCode);
         Assert.Collection(
             promptedPackages!,
-            p => Assert.Equal("Aspire.Hosting.Azure.Redis", p.Package.Id),
-            p => Assert.Equal("Aspire.Hosting.Redis", p.Package.Id)
+            p => Assert.Equal("Aspire.Hosting.Redis", p.Package.Id),
+            p => Assert.Equal("Aspire.Hosting.Azure.Redis", p.Package.Id)
             );
         Assert.Equal("Aspire.Hosting.Redis", addedPackageName);
         Assert.Equal("9.2.0", addedPackageVersion);
@@ -538,6 +538,212 @@ public class AddCommandTests(ITestOutputHelper outputHelper)
         Assert.Equal(expectedFriendlyName, result.FriendlyName);
         Assert.Equal(package, result.Package);
     }
+
+    [Fact]
+    public async Task AddCommandPrompter_FiltersToHighestVersionPerPackageId()
+    {
+        // Arrange
+        List<(string FriendlyName, NuGetPackage Package, PackageChannel Channel)>? displayedPackages = null;
+
+        using var workspace = TemporaryWorkspace.Create(outputHelper);
+        var services = CliTestHelper.CreateServiceCollection(workspace, outputHelper, options =>
+        {
+            options.InteractionServiceFactory = (sp) =>
+            {
+                var mockInteraction = new TestConsoleInteractionService();
+                mockInteraction.PromptForSelectionCallback = (message, choices, formatter, ct) =>
+                {
+                    // Capture what the prompter passes to the interaction service
+                    var choicesList = choices.Cast<(string FriendlyName, NuGetPackage Package, PackageChannel Channel)>().ToList();
+                    displayedPackages = choicesList;
+                    return choicesList.First();
+                };
+                return mockInteraction;
+            };
+        });
+        var provider = services.BuildServiceProvider();
+        var interactionService = provider.GetRequiredService<IInteractionService>();
+
+        var prompter = new AddCommandPrompter(interactionService);
+
+        // Create a fake channel
+        var fakeCache = new FakeNuGetPackageCache();
+        var channel = PackageChannel.CreateImplicitChannel(fakeCache);
+
+        // Create multiple versions of the same package
+        var packages = new[]
+        {
+            ("redis", new NuGetPackage { Id = "Aspire.Hosting.Redis", Version = "9.0.0", Source = "nuget" }, channel),
+            ("redis", new NuGetPackage { Id = "Aspire.Hosting.Redis", Version = "9.2.0", Source = "nuget" }, channel),
+            ("redis", new NuGetPackage { Id = "Aspire.Hosting.Redis", Version = "9.1.0", Source = "nuget" }, channel),
+        };
+
+        // Act
+        await prompter.PromptForIntegrationAsync(packages, CancellationToken.None);
+
+        // Assert - should only show highest version (9.2.0) for the package ID
+        Assert.NotNull(displayedPackages);
+        Assert.Single(displayedPackages!);
+        Assert.Equal("9.2.0", displayedPackages!.First().Package.Version);
+    }
+
+    [Fact]
+    public async Task AddCommandPrompter_FiltersToHighestVersionPerChannel()
+    {
+        // Arrange
+        List<object>? displayedChoices = null;
+
+        using var workspace = TemporaryWorkspace.Create(outputHelper);
+        var services = CliTestHelper.CreateServiceCollection(workspace, outputHelper, options =>
+        {
+            options.InteractionServiceFactory = (sp) =>
+            {
+                var mockInteraction = new TestConsoleInteractionService();
+                mockInteraction.PromptForSelectionCallback = (message, choices, formatter, ct) =>
+                {
+                    // Capture what the prompter passes to the interaction service
+                    var choicesList = choices.Cast<object>().ToList();
+                    displayedChoices = choicesList;
+                    return choicesList.First();
+                };
+                return mockInteraction;
+            };
+        });
+        var provider = services.BuildServiceProvider();
+        var interactionService = provider.GetRequiredService<IInteractionService>();
+
+        var prompter = new AddCommandPrompter(interactionService);
+
+        // Create a fake channel
+        var fakeCache = new FakeNuGetPackageCache();
+        var channel = PackageChannel.CreateImplicitChannel(fakeCache);
+
+        // Create multiple versions of the same package from same channel
+        var packages = new[]
+        {
+            ("redis", new NuGetPackage { Id = "Aspire.Hosting.Redis", Version = "9.0.0", Source = "nuget" }, channel),
+            ("redis", new NuGetPackage { Id = "Aspire.Hosting.Redis", Version = "9.2.0", Source = "nuget" }, channel),
+            ("redis", new NuGetPackage { Id = "Aspire.Hosting.Redis", Version = "9.1.0", Source = "nuget" }, channel),
+            ("redis", new NuGetPackage { Id = "Aspire.Hosting.Redis", Version = "9.0.1-preview.1", Source = "nuget" }, channel),
+        };
+
+        // Act
+        var result = await prompter.PromptForIntegrationVersionAsync(packages, CancellationToken.None);
+
+        // Assert - For implicit channel with no explicit channels, should automatically select highest version without prompting
+        Assert.Null(displayedChoices); // No prompt should be shown
+        Assert.Equal("9.2.0", result.Package.Version); // Should return highest version
+    }
+
+    [Fact]
+    public async Task AddCommandPrompter_ShowsHighestVersionPerChannelWhenMultipleChannels()
+    {
+        // Arrange
+        List<object>? displayedChoices = null;
+
+        using var workspace = TemporaryWorkspace.Create(outputHelper);
+        var services = CliTestHelper.CreateServiceCollection(workspace, outputHelper, options =>
+        {
+            options.InteractionServiceFactory = (sp) =>
+            {
+                var mockInteraction = new TestConsoleInteractionService();
+                mockInteraction.PromptForSelectionCallback = (message, choices, formatter, ct) =>
+                {
+                    // Capture what the prompter passes to the interaction service
+                    var choicesList = choices.Cast<object>().ToList();
+                    displayedChoices = choicesList;
+                    return choicesList.First();
+                };
+                return mockInteraction;
+            };
+        });
+        var provider = services.BuildServiceProvider();
+        var interactionService = provider.GetRequiredService<IInteractionService>();
+
+        var prompter = new AddCommandPrompter(interactionService);
+
+        // Create two different channels
+        var fakeCache = new FakeNuGetPackageCache();
+        var implicitChannel = PackageChannel.CreateImplicitChannel(fakeCache);
+        
+        var mappings = new[] { new PackageMapping("Aspire*", "https://preview-feed") };
+        var explicitChannel = PackageChannel.CreateExplicitChannel("preview", PackageChannelQuality.Prerelease, mappings, fakeCache);
+
+        // Create packages from different channels with different versions
+        var packages = new[]
+        {
+            ("redis", new NuGetPackage { Id = "Aspire.Hosting.Redis", Version = "9.0.0", Source = "nuget" }, implicitChannel),
+            ("redis", new NuGetPackage { Id = "Aspire.Hosting.Redis", Version = "9.1.0", Source = "nuget" }, implicitChannel),
+            ("redis", new NuGetPackage { Id = "Aspire.Hosting.Redis", Version = "9.2.0", Source = "nuget" }, implicitChannel),
+            ("redis", new NuGetPackage { Id = "Aspire.Hosting.Redis", Version = "10.0.0-preview.1", Source = "preview-feed" }, explicitChannel),
+            ("redis", new NuGetPackage { Id = "Aspire.Hosting.Redis", Version = "10.0.0-preview.2", Source = "preview-feed" }, explicitChannel),
+        };
+
+        // Act
+        await prompter.PromptForIntegrationVersionAsync(packages, CancellationToken.None);
+
+        // Assert - should show 2 root choices: one for implicit channel, one submenu for explicit channel
+        Assert.NotNull(displayedChoices);
+        Assert.Equal(2, displayedChoices!.Count);
+    }
+
+    [Fact]
+    public async Task AddCommand_WithoutHives_UsesImplicitChannelWithoutPrompting()
+    {
+        // Arrange
+        using var workspace = TemporaryWorkspace.Create(outputHelper);
+        
+        var selectedPackageId = string.Empty;
+        
+        var services = CliTestHelper.CreateServiceCollection(workspace, outputHelper, options =>
+        {
+            options.ProjectLocatorFactory = _ => new TestProjectLocator();
+
+            options.InteractionServiceFactory = _ => new TestConsoleInteractionService()
+            {
+                PromptForSelectionCallback = (message, choices, formatter, ct) =>
+                {
+                    return choices.Cast<object>().First();
+                }
+            };
+
+            options.DotNetCliRunnerFactory = (sp) =>
+            {
+                var runner = new TestDotNetCliRunner();
+                runner.SearchPackagesAsyncCallback = (dir, query, prerelease, take, skip, nugetSource, useCache, options, cancellationToken) =>
+                {
+                    var redisPackage = new NuGetPackage()
+                    {
+                        Id = "Aspire.Hosting.Redis",
+                        Source = "nuget",
+                        Version = "9.2.0"
+                    };
+
+                    return (0, new NuGetPackage[] { redisPackage });
+                };
+
+                runner.AddPackageAsyncCallback = (projectFilePath, packageName, packageVersion, nugetSource, options, cancellationToken) =>
+                {
+                    selectedPackageId = packageName;
+                    return 0;
+                };
+
+                return runner;
+            };
+        });
+        
+        var provider = services.BuildServiceProvider();
+
+        // Act - without hives, should automatically select from implicit channel without prompting
+        var command = provider.GetRequiredService<AddCommand>();
+        var result = command.Parse("add redis");
+
+        var exitCode = await result.InvokeAsync().WaitAsync(CliTestConstants.DefaultTimeout);
+
+        // Assert
+        Assert.Equal(0, exitCode);
+        Assert.Equal("Aspire.Hosting.Redis", selectedPackageId);
+    }
 }
 
 internal sealed class TestAddCommandPrompter(IInteractionService interactionService) : AddCommandPrompter(interactionService)
@@ -561,5 +767,239 @@ internal sealed class TestAddCommandPrompter(IInteractionService interactionServ
             { } callback => Task.FromResult(callback(packages)),
             _ => Task.FromResult(packages.First()) // If no callback is provided just accept the first package.
         };
+    }
+}
+
+public class AddCommandFuzzySearchTests(ITestOutputHelper outputHelper)
+{
+    [Fact]
+    public async Task AddCommand_WithStartsWith_FindsMatchUsingFuzzySearch()
+    {
+        var promptedPackages = new List<(string FriendlyName, NuGetPackage Package, PackageChannel Channel)>();
+        var addedPackage = string.Empty;
+
+        using var workspace = TemporaryWorkspace.Create(outputHelper);
+        var services = CliTestHelper.CreateServiceCollection(workspace, outputHelper, options =>
+        {
+            options.AddCommandPrompterFactory = (sp) =>
+            {
+                var interactionService = sp.GetRequiredService<IInteractionService>();
+                var prompter = new TestAddCommandPrompter(interactionService);
+
+                prompter.PromptForIntegrationCallback = (packages) =>
+                {
+                    promptedPackages.AddRange(packages);
+                    return packages.First();
+                };
+
+                return prompter;
+            };
+
+            options.ProjectLocatorFactory = _ => new TestProjectLocator();
+
+            options.DotNetCliRunnerFactory = (sp) =>
+            {
+                var runner = new TestDotNetCliRunner();
+                runner.SearchPackagesAsyncCallback = (dir, query, prerelease, take, skip, nugetSource, useCache, options, cancellationToken) =>
+                {
+                    var postgresPackage = new NuGetPackage()
+                    {
+                        Id = "Aspire.Hosting.PostgreSQL",
+                        Source = "nuget",
+                        Version = "9.2.0"
+                    };
+
+                    var redisPackage = new NuGetPackage()
+                    {
+                        Id = "Aspire.Hosting.Redis",
+                        Source = "nuget",
+                        Version = "9.2.0"
+                    };
+
+                    var rabbitMQPackage = new NuGetPackage()
+                    {
+                        Id = "Aspire.Hosting.RabbitMQ",
+                        Source = "nuget",
+                        Version = "9.2.0"
+                    };
+
+                    return (
+                        0, // Exit code.
+                        new NuGetPackage[] { postgresPackage, redisPackage, rabbitMQPackage }
+                    );
+                };
+
+                runner.AddPackageAsyncCallback = (projectFilePath, packageName, packageVersion, nugetSource, options, cancellationToken) =>
+                {
+                    addedPackage = packageName;
+                    return 0; // Success.
+                };
+
+                return runner;
+            };
+        });
+        var provider = services.BuildServiceProvider();
+
+        var command = provider.GetRequiredService<AddCommand>();
+        // Use "postgre" instead of "postgresql" - should still find it via fuzzy search
+        var result = command.Parse("add postgre");
+
+        var exitCode = await result.InvokeAsync().WaitAsync(CliTestConstants.DefaultTimeout);
+        Assert.Equal(0, exitCode);
+        // Verify that PostgreSQL package was added through fuzzy matching
+        Assert.Equal("Aspire.Hosting.PostgreSQL", addedPackage);
+    }
+
+    [Fact]
+    public async Task AddCommand_WithPartialMatch_FiltersUsingFuzzySearch()
+    {
+        var promptedPackages = new List<(string FriendlyName, NuGetPackage Package, PackageChannel Channel)>();
+
+        using var workspace = TemporaryWorkspace.Create(outputHelper);
+        var services = CliTestHelper.CreateServiceCollection(workspace, outputHelper, options =>
+        {
+            options.AddCommandPrompterFactory = (sp) =>
+            {
+                var interactionService = sp.GetRequiredService<IInteractionService>();
+                var prompter = new TestAddCommandPrompter(interactionService);
+
+                prompter.PromptForIntegrationCallback = (packages) =>
+                {
+                    promptedPackages.AddRange(packages);
+                    return packages.First();
+                };
+
+                return prompter;
+            };
+
+            options.ProjectLocatorFactory = _ => new TestProjectLocator();
+
+            options.DotNetCliRunnerFactory = (sp) =>
+            {
+                var runner = new TestDotNetCliRunner();
+                runner.SearchPackagesAsyncCallback = (dir, query, prerelease, take, skip, nugetSource, useCache, options, cancellationToken) =>
+                {
+                    var postgresPackage = new NuGetPackage()
+                    {
+                        Id = "Aspire.Hosting.PostgreSQL",
+                        Source = "nuget",
+                        Version = "9.2.0"
+                    };
+
+                    var redisPackage = new NuGetPackage()
+                    {
+                        Id = "Aspire.Hosting.Redis",
+                        Source = "nuget",
+                        Version = "9.2.0"
+                    };
+
+                    var rabbitMQPackage = new NuGetPackage()
+                    {
+                        Id = "Aspire.Hosting.RabbitMQ",
+                        Source = "nuget",
+                        Version = "9.2.0"
+                    };
+
+                    var mysqlPackage = new NuGetPackage()
+                    {
+                        Id = "Aspire.Hosting.MySql",
+                        Source = "nuget",
+                        Version = "9.2.0"
+                    };
+
+                    return (
+                        0, // Exit code.
+                        new NuGetPackage[] { postgresPackage, redisPackage, rabbitMQPackage, mysqlPackage }
+                    );
+                };
+
+                runner.AddPackageAsyncCallback = (projectFilePath, packageName, packageVersion, nugetSource, options, cancellationToken) =>
+                {
+                    return 0; // Success.
+                };
+
+                return runner;
+            };
+        });
+        var provider = services.BuildServiceProvider();
+
+        var command = provider.GetRequiredService<AddCommand>();
+        // Use "sql" - should match both PostgreSQL and MySql, but not Redis or RabbitMQ
+        var result = command.Parse("add sql");
+
+        var exitCode = await result.InvokeAsync().WaitAsync(CliTestConstants.DefaultTimeout);
+        Assert.Equal(0, exitCode);
+        // Should have prompted with packages that fuzzy match "sql"
+        Assert.True(promptedPackages.Count > 0);
+        Assert.Contains(promptedPackages, p => p.Package.Id.Contains("SQL", StringComparison.OrdinalIgnoreCase));
+    }
+
+    [Fact]
+    public async Task AddCommand_WithTypo_FindsMatchUsingFuzzySearch()
+    {
+        var addedPackage = string.Empty;
+
+        using var workspace = TemporaryWorkspace.Create(outputHelper);
+        var services = CliTestHelper.CreateServiceCollection(workspace, outputHelper, options =>
+        {
+            options.AddCommandPrompterFactory = (sp) =>
+            {
+                var interactionService = sp.GetRequiredService<IInteractionService>();
+                return new TestAddCommandPrompter(interactionService);
+            };
+
+            options.ProjectLocatorFactory = _ => new TestProjectLocator();
+
+            options.DotNetCliRunnerFactory = (sp) =>
+            {
+                var runner = new TestDotNetCliRunner();
+                runner.SearchPackagesAsyncCallback = (dir, query, prerelease, take, skip, nugetSource, useCache, options, cancellationToken) =>
+                {
+                    var appContainersPackage = new NuGetPackage()
+                    {
+                        Id = "Aspire.Hosting.Azure.AppContainers",
+                        Source = "nuget",
+                        Version = "9.2.0"
+                    };
+
+                    var redisPackage = new NuGetPackage()
+                    {
+                        Id = "Aspire.Hosting.Redis",
+                        Source = "nuget",
+                        Version = "9.2.0"
+                    };
+
+                    var postgresPackage = new NuGetPackage()
+                    {
+                        Id = "Aspire.Hosting.PostgreSQL",
+                        Source = "nuget",
+                        Version = "9.2.0"
+                    };
+
+                    return (
+                        0, // Exit code.
+                        new NuGetPackage[] { appContainersPackage, redisPackage, postgresPackage }
+                    );
+                };
+
+                runner.AddPackageAsyncCallback = (projectFilePath, packageName, packageVersion, nugetSource, options, cancellationToken) =>
+                {
+                    addedPackage = packageName;
+                    return 0; // Success.
+                };
+
+                return runner;
+            };
+        });
+        var provider = services.BuildServiceProvider();
+
+        var command = provider.GetRequiredService<AddCommand>();
+        // Use "azureapp" (Azure AppContainers) - should find Azure.AppContainers via fuzzy search
+        var result = command.Parse("add azureapp");
+
+        var exitCode = await result.InvokeAsync().WaitAsync(CliTestConstants.DefaultTimeout);
+        Assert.Equal(0, exitCode);
+        // Verify that Azure AppContainers package was found and added through fuzzy matching
+        Assert.Equal("Aspire.Hosting.Azure.AppContainers", addedPackage);
     }
 }

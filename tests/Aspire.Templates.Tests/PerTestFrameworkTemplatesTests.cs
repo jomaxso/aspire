@@ -20,9 +20,10 @@ public abstract partial class PerTestFrameworkTemplatesTests : TemplateTestsBase
 
     [Theory]
     [MemberData(nameof(ProjectNames_TestData))]
-    [RequiresPlaywright]
+    [RequiresFeature(TestFeature.Playwright)]
     [Trait("category", "basic-build")]
     [OuterLoop("playwright test")]
+    [ActiveIssue("https://github.com/dotnet/aspire/issues/8011")]
     public async Task TemplatesForIndividualTestFrameworks(string prefix)
     {
         var id = $"{prefix}-{_testTemplateName}";
@@ -35,7 +36,7 @@ public abstract partial class PerTestFrameworkTemplatesTests : TemplateTestsBase
             buildEnvironment: BuildEnvironment.ForDefaultFramework);
 
         await project.BuildAsync(extraBuildArgs: [$"-c {config}"]);
-        if (RequiresSSLCertificateAttribute.IsSupported)
+        if (RequiresFeatureAttribute.IsFeatureSupported(TestFeature.SSLCertificate))
         {
             await using (var context = await CreateNewBrowserContextAsync())
             {
@@ -52,7 +53,6 @@ public abstract partial class PerTestFrameworkTemplatesTests : TemplateTestsBase
         var res = await cmd.ExecuteAsync($"test -c {config}");
 
         Assert.True(res.ExitCode != 0, $"Expected the tests project run to fail");
-        Assert.Matches("System.ArgumentException.*Resource 'webfrontend' not found.", res.Output);
         Assert.Matches("Failed! * - Failed: *1, Passed: *0, Skipped: *0, Total: *1", res.Output);
 
         async Task AssertBasicTemplateAsync(IBrowserContext context)

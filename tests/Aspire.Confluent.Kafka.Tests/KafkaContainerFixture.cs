@@ -63,7 +63,7 @@ public partial class KafkaContainerFixture : IAsyncLifetime
                     startupScript.Append($"export KAFKA_ADVERTISED_LISTENERS=PLAINTEXT://localhost:29092,PLAINTEXT_HOST://localhost:{container.GetMappedPublicPort(KafkaPort)}");
                     startupScript.Append(lf);
                     startupScript.Append("exec /etc/confluent/docker/run");
-                    return container.CopyAsync(Encoding.Default.GetBytes(startupScript.ToString()), StartupScriptFilePath, Unix.FileMode755, ct);
+                    return container.CopyAsync(Encoding.Default.GetBytes(startupScript.ToString()), StartupScriptFilePath, fileMode: Unix.FileMode755, ct: ct);
                 });
         }
 
@@ -88,7 +88,7 @@ public partial class KafkaContainerFixture : IAsyncLifetime
 
     public async ValueTask InitializeAsync()
     {
-        if (RequiresDockerAttribute.IsSupported)
+        if (RequiresFeatureAttribute.IsFeatureSupported(TestFeature.Docker))
         {
             Container = new ConfluentLocalKafkaBuilder().Build();
             await Container.StartAsync();

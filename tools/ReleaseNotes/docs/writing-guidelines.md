@@ -5,7 +5,7 @@
 Follow the established structure from `data/whats-new-*.md` files:
 
 1. **Frontmatter** (YAML header with title, description, ms.date)
-2. **Main Title** (`# What's new in .NET Aspire {version}`)
+2. **Main Title** (`# What's new in Aspire {version}`)
 3. **Introduction** with supported .NET versions and feedback links
 4. **Version Support Policy** information
 5. **Major Sections** with emoji headers (🖥️, ✨, 🔗, 🚀, etc.)
@@ -17,14 +17,14 @@ Follow the established structure from `data/whats-new-*.md` files:
 
 ```markdown
 ---
-title: What's new in .NET Aspire {version}
-description: Learn what's new in .NET Aspire {version}.
+title: What's new in Aspire {version}
+description: Learn what's new in Aspire {version}.
 ms.date: {date}
 ---
 
-# What's new in .NET Aspire {version}
+# What's new in Aspire {version}
 
-📢 .NET Aspire {version} is the next [major|minor] version release...
+📢 Aspire {version} is the next [major|minor] version release...
 
 ## 🖥️ App model enhancements
 ### ✨ Feature Name
@@ -111,7 +111,7 @@ Follow the established emoji patterns from existing templates:
 ```markdown
 ### ✨ Azure AI Foundry integration
 
-.NET Aspire now provides first-class support for Azure AI Foundry, enabling you to easily integrate AI models and deployments into your distributed applications.
+Aspire now provides first-class support for Azure AI Foundry, enabling you to easily integrate AI models and deployments into your distributed applications.
 
 ```csharp
 var builder = DistributedApplication.CreateBuilder(args);
@@ -139,14 +139,14 @@ This integration streamlines AI model deployment and management, allowing you to
 
 The Azure Storage APIs have been consolidated for better consistency across blob, table, and queue services.
 
-**Before (.NET Aspire 9.0)**:
+**Before (Aspire 9.0)**:
 ```csharp
 // Old inconsistent naming
 builder.AddAzureBlobStorage("storage");
 builder.AddAzureDataTables("tables"); 
 ```
 
-**After (.NET Aspire 9.1)**:
+**After (Aspire 9.1)**:
 ```csharp
 // New consistent naming
 builder.AddAzureStorage("storage");

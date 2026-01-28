@@ -1,11 +1,67 @@
 import * as vscode from 'vscode';
-import { dontShowAgainLabel, doYouWantToSetDefaultApphost, noLabel, noWorkspaceOpen, selectDefaultLaunchApphost, yesLabel } from '../loc/strings';
+import { cliNotAvailable, dismissLabel, dontShowAgainLabel, doYouWantToSetDefaultApphost, noLabel, noWorkspaceOpen, openCliInstallInstructions, selectDefaultLaunchApphost, yesLabel } from '../loc/strings';
 import path from 'path';
 import { spawnCliProcess } from '../debugger/languages/cli';
 import { AspireTerminalProvider } from './AspireTerminalProvider';
-import { ChildProcessWithoutNullStreams } from 'child_process';
+import { ChildProcessWithoutNullStreams, execFile } from 'child_process';
 import { AspireSettingsFile } from './cliTypes';
 import { extensionLogOutputChannel } from './logging';
+import { EnvironmentVariables } from './environment';
+import { promisify } from 'util';
+
+/**
+ * Common file patterns to exclude from workspace file searches.
+ * These patterns match typical build outputs, dependencies, and generated files
+ * that should not be searched when looking for Aspire configuration files.
+ */
+const commonExcludePatterns = [
+    // Build outputs
+    '**/artifacts/**',
+    '**/[Bb]in/**',
+    '**/[Oo]bj/**',
+    '**/[Dd]ebug/**',
+    '**/[Rr]elease/**',
+    '**/dist/**',
+    '**/out/**',
+    '**/build/**',
+    '**/target/**',
+    '**/publish/**',
+
+    // Dependencies
+    '**/node_modules/**',
+    '**/.venv/**',
+    '**/packages/**',
+
+    // IDE/Tool directories
+    '**/.vs/**',
+    '**/.vscode-test/**',
+    '**/.idea/**',
+    '**/.git/**',
+
+    // Generated/Cache
+    '**/.angular/**',
+    '**/.modules/**',
+    '**/.azurite/**',
+];
+
+/**
+ * Returns a glob pattern suitable for use as an exclude pattern in vscode.workspace.findFiles.
+ * This excludes common build outputs, dependencies, and generated directories.
+ */
+export function getCommonExcludeGlob(): string {
+    return `{${commonExcludePatterns.join(',')}}`;
+}
+
+/**
+ * Searches for Aspire settings.json files in the workspace, excluding common build output
+ * and dependency directories.
+ * @returns An array of URIs pointing to found settings.json files
+ */
+export async function findAspireSettingsFiles(): Promise<vscode.Uri[]> {
+    const searchSubpath = '**/.aspire/settings.json';
+    const excludePattern = getCommonExcludeGlob();
+    return vscode.workspace.findFiles(searchSubpath, excludePattern);
+}
 
 export function isWorkspaceOpen(showErrorMessage: boolean = true): boolean {
     const isOpen = !!vscode.workspace.workspaceFolders && vscode.workspace.workspaceFolders.length > 0;
@@ -46,17 +102,15 @@ function isAppHostProjectSearchResult(obj: any): obj is AppHostProjectSearchResu
     return obj && (typeof obj.selected_project_file === 'string' || obj.selected_project_file === null) && Array.isArray(obj.all_project_file_candidates);
 }
 
-export async function checkForExistingAppHostPathInWorkspace(terminalProvider: AspireTerminalProvider): Promise<vscode.Disposable | null> {
+export async function checkForExistingAppHostPathInWorkspace(terminalProvider: AspireTerminalProvider, getEnableSettingsFileCreationPromptOnStartup: () => boolean, setEnableSettingsFileCreationPromptOnStartup: (value: boolean) => Promise<void>): Promise<vscode.Disposable | null> {
     extensionLogOutputChannel.info('Checking for existing AppHost path in workspace');
-    
-    const cfg = vscode.workspace.getConfiguration('aspire');
-    const enabled = cfg.get<boolean>('enableSettingsFileCreationPromptOnStartup', true);
 
+    const enabled = getEnableSettingsFileCreationPromptOnStartup();
     if (!enabled) {
         extensionLogOutputChannel.info('AppHost path prompt is disabled in settings, skipping check');
         return null;
     }
-    
+
     if (!isWorkspaceOpen(false)) {
         extensionLogOutputChannel.info('No workspace open, skipping AppHost path check');
         return null;
@@ -70,35 +124,47 @@ export async function checkForExistingAppHostPathInWorkspace(terminalProvider: A
         extensionLogOutputChannel.warn('No workspace folder found, skipping AppHost path check');
         return null;
     }
-    
+
     extensionLogOutputChannel.info(`Checking AppHost settings in workspace: ${rootFolder.name}`);
 
-    const settingsFileLocation = vscode.Uri.joinPath(rootFolder.uri, '.aspire/settings.json');
-    const settingsFileExists = await vscode.workspace.fs.stat(settingsFileLocation).then(() => true, () => false);
-    
+    // Search for settings.json files in any .aspire directory anywhere in the workspace
+    const settingsFiles = await findAspireSettingsFiles();
+    const settingsFileExists = settingsFiles.length > 0;
+
     if (settingsFileExists) {
-        extensionLogOutputChannel.info(`Found existing Aspire settings file at: ${settingsFileLocation.fsPath}`);
-        const settingsFileContent = await vscode.workspace.fs.readFile(settingsFileLocation);
-        const settings = JSON.parse(settingsFileContent.toString());
-        if (settings.appHostPath) {
-            extensionLogOutputChannel.info(`AppHost path already configured: ${settings.appHostPath}`);
+        extensionLogOutputChannel.info(`Found existing Aspire settings file at: ${settingsFiles.map(f => f.fsPath).join(', ')}`);
+        for (const file of settingsFiles) {
+            const settingsFileContent = await vscode.workspace.fs.readFile(file);
+            const settings = JSON.parse(settingsFileContent.toString());
+            if (settings.appHostPath) {
+                extensionLogOutputChannel.info(`AppHost path already configured in file ${file.fsPath}: ${settings.appHostPath}`);
+                return null;
+            }
+        }
+
+        extensionLogOutputChannel.info('Settings file(s) exist but no appHostPath is set');
+        if (settingsFiles.length > 1) {
+            // Multiple settings files exist, so don't prompt
+            extensionLogOutputChannel.warn(`Multiple Aspire settings files found (${settingsFiles.length}). Not prompting to choose between them.`);
             return null;
         }
-        extensionLogOutputChannel.info('Settings file exists but no appHostPath is set');
-    } else {
+    }
+    else {
         extensionLogOutputChannel.info('No Aspire settings file found, will create if AppHost is selected');
+        settingsFiles.push(vscode.Uri.file(path.join(rootFolder.uri.fsPath, '.aspire', 'settings.json')));
     }
 
+    const settingsFile = settingsFiles[0];
     extensionLogOutputChannel.info('Searching for AppHost projects using CLI command: aspire extension get-apphosts');
-    
+
     let proc: ChildProcessWithoutNullStreams;
     new Promise<AppHostProjectSearchResult>((resolve, reject) => {
         const args = ['extension', 'get-apphosts'];
-        if (process.env.ASPIRE_CLI_STOP_ON_ENTRY === 'true') {
+        if (process.env[EnvironmentVariables.ASPIRE_CLI_STOP_ON_ENTRY] === 'true') {
             args.push('--cli-wait-for-debugger');
         }
-        
-        proc = spawnCliProcess(terminalProvider, terminalProvider.getAspireCliExecutablePath(false), args, {
+
+        proc = spawnCliProcess(terminalProvider, terminalProvider.getAspireCliExecutablePath(), args, {
             errorCallback: error => {
                 extensionLogOutputChannel.error(`Error executing get-apphosts command: ${error}`);
                 reject();
@@ -122,7 +188,7 @@ export async function checkForExistingAppHostPathInWorkspace(terminalProvider: A
             workingDirectory: rootFolder.uri.fsPath
         });
     })
-        .then(result => promptToAddAppHostPathToSettingsFile(result, settingsFileExists, settingsFileLocation, rootFolder))
+        .then(result => promptToAddAppHostPathToSettingsFile(result, settingsFileExists, settingsFile, rootFolder, setEnableSettingsFileCreationPromptOnStartup))
         .catch(error => {
             extensionLogOutputChannel.error(`Failed to retrieve AppHost projects: ${error}`);
         })
@@ -135,27 +201,26 @@ export async function checkForExistingAppHostPathInWorkspace(terminalProvider: A
     };
 }
 
-async function promptToAddAppHostPathToSettingsFile(result: AppHostProjectSearchResult, settingsFileExists: boolean, settingsFileLocation: vscode.Uri, rootFolder: vscode.WorkspaceFolder) {
+async function promptToAddAppHostPathToSettingsFile(result: AppHostProjectSearchResult, settingsFileExists: boolean, settingsFileLocation: vscode.Uri, rootFolder: vscode.WorkspaceFolder, setEnableSettingsFileCreationPromptOnStartup: (value: boolean) => Promise<void>): Promise<void> {
     if (!result.selected_project_file && result.all_project_file_candidates.length === 0) {
         extensionLogOutputChannel.info('No AppHost projects found in workspace');
         return;
     }
-    
+
     extensionLogOutputChannel.info('Prompting user to set default AppHost path');
     const shouldSetApphostResponse = await vscode.window.showInformationMessage(!result.selected_project_file ? selectDefaultLaunchApphost : doYouWantToSetDefaultApphost(vscode.workspace.asRelativePath(result.selected_project_file)), yesLabel, noLabel, dontShowAgainLabel);
-    
+
     if (shouldSetApphostResponse !== yesLabel) {
         if (shouldSetApphostResponse === dontShowAgainLabel) {
             extensionLogOutputChannel.info('User selected "Don\'t show again", disabling startup prompt');
-            const cfg = vscode.workspace.getConfiguration('aspire');
-            await cfg.update('enableSettingsFileCreationPromptOnStartup', false, vscode.ConfigurationTarget.Workspace);
+            await setEnableSettingsFileCreationPromptOnStartup(false);
         } else {
             extensionLogOutputChannel.info('User declined to set AppHost path');
         }
 
         return;
     }
-    
+
     extensionLogOutputChannel.info('User accepted to set AppHost path');
 
     let appHostToUse: string | null = result.selected_project_file;
@@ -169,7 +234,7 @@ async function promptToAddAppHostPathToSettingsFile(result: AppHostProjectSearch
         }) ?? null;
 
         appHostToUse = selected ? path.join(rootFolder.uri.fsPath, selected) : null;
-        
+
         if (selected) {
             extensionLogOutputChannel.info(`User selected AppHost: ${selected}`);
         } else {
@@ -199,6 +264,48 @@ async function promptToAddAppHostPathToSettingsFile(result: AppHostProjectSearch
 
     const updatedSettingsFileContent = Buffer.from(JSON.stringify(aspireSettingsFile, null, 4), 'utf8');
     await vscode.workspace.fs.writeFile(settingsFileLocation, updatedSettingsFileContent);
-    
+
     extensionLogOutputChannel.info(`Successfully set appHostPath to: ${appHostToUse} in ${settingsFileLocation.fsPath}`);
+}
+
+const execFileAsync = promisify(execFile);
+
+let cliAvailableOnPath: boolean | undefined = undefined;
+
+/**
+ * Checks if the Aspire CLI is available. If not, shows a message prompting to open Aspire CLI installation steps on the repo.
+ * @param cliPath The path to the Aspire CLI executable
+ * @returns true if CLI is available, false otherwise
+ */
+export async function checkCliAvailableOrRedirect(cliPath: string): Promise<boolean> {
+    if (cliAvailableOnPath === true) {
+        // Assume, for now, that CLI availability does not change during the session if it was previously confirmed
+        return Promise.resolve(true);
+    }
+
+    try {
+        // Remove surrounding quotes if present (both single and double quotes)
+        let cleanPath = cliPath.trim();
+        if ((cleanPath.startsWith("'") && cleanPath.endsWith("'")) ||
+            (cleanPath.startsWith('"') && cleanPath.endsWith('"'))) {
+            cleanPath = cleanPath.slice(1, -1);
+        }
+        await execFileAsync(cleanPath, ['--version'], { timeout: 5000 });
+        cliAvailableOnPath = true;
+        return true;
+    } catch (error) {
+        cliAvailableOnPath = false;
+        vscode.window.showErrorMessage(
+            cliNotAvailable,
+            openCliInstallInstructions,
+            dismissLabel
+        ).then(selection => {
+            if (selection === openCliInstallInstructions) {
+                // Go to Aspire CLI installation instruction page in external browser
+                vscode.env.openExternal(vscode.Uri.parse('https://aspire.dev/get-started/install-cli/'));
+            }
+        });
+
+        return false;
+    }
 }

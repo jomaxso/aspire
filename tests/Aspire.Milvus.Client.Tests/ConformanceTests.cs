@@ -16,10 +16,10 @@ public class ConformanceTests : ConformanceTests<MilvusClient, MilvusClientSetti
     private readonly MilvusContainerFixture? _containerFixture;
     private string ConnectionString { get; set; }
 
-    public ConformanceTests(MilvusContainerFixture? containerFixture)
+    public ConformanceTests(MilvusContainerFixture? containerFixture, ITestOutputHelper? output = null) : base(output)
     {
         _containerFixture = containerFixture;
-        ConnectionString = (_containerFixture is not null && RequiresDockerAttribute.IsSupported)
+        ConnectionString = (_containerFixture is not null && RequiresFeatureAttribute.IsFeatureSupported(TestFeature.Docker))
                                         ? _containerFixture.GetConnectionString()
                                         : $"Endpoint=http://localhost:19530;Key=root:Milvus";
     }
@@ -27,7 +27,7 @@ public class ConformanceTests : ConformanceTests<MilvusClient, MilvusClientSetti
 
     protected override bool CanCreateClientWithoutConnectingToServer => true;
 
-    protected override bool CanConnectToServer => RequiresDockerAttribute.IsSupported;
+    protected override bool CanConnectToServer => RequiresFeatureAttribute.IsFeatureSupported(TestFeature.Docker);
 
     protected override ServiceLifetime ServiceLifetime => ServiceLifetime.Singleton;
 

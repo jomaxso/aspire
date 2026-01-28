@@ -1,11 +1,18 @@
 // Licensed to the .NET Foundation under one or more agreements.
 // The .NET Foundation licenses this file to you under the MIT license.
 
+#pragma warning disable ASPIREPIPELINES001 // Type is for evaluation purposes only and is subject to change or removal in future updates. Suppress this diagnostic to proceed.
+#pragma warning disable ASPIREPIPELINES003 // Type is for evaluation purposes only and is subject to change or removal in future updates. Suppress this diagnostic to proceed.
+#pragma warning disable ASPIREFILESYSTEM001 // Type is for evaluation purposes only
+
 using System.Diagnostics.CodeAnalysis;
 using System.Text;
 using Aspire.Hosting.ApplicationModel;
 using Aspire.Hosting.ApplicationModel.Docker;
+using Aspire.Hosting.Pipelines;
+using Aspire.Hosting.Publishing;
 using Aspire.Hosting.Utils;
+using Microsoft.Extensions.DependencyInjection;
 
 namespace Aspire.Hosting;
 
@@ -15,12 +22,75 @@ namespace Aspire.Hosting;
 public static class ContainerResourceBuilderExtensions
 {
     /// <summary>
+    /// Ensures that a container resource has PipelineStepAnnotations for building and pushing.
+    /// </summary>
+    /// <typeparam name="T">The type of container resource.</typeparam>
+    /// <param name="builder">The resource builder.</param>
+    internal static IResourceBuilder<T> EnsureBuildAndPushPipelineAnnotations<T>(this IResourceBuilder<T> builder) where T : ContainerResource
+    {
+        builder.WithAnnotation(new PipelineStepAnnotation((factoryContext) =>
+        {
+            var steps = new List<PipelineStep>();
+
+            if (builder.Resource.IsExcludedFromPublish())
+            {
+                return steps;
+            }
+
+            if (builder.Resource.RequiresImageBuild())
+            {
+                var buildStep = new PipelineStep
+                {
+                    Name = $"build-{builder.Resource.Name}",
+                    Action = async ctx =>
+                    {
+                        var containerImageBuilder = ctx.Services.GetRequiredService<IResourceContainerImageManager>();
+                        await containerImageBuilder.BuildImageAsync(
+                            builder.Resource,
+                            ctx.CancellationToken).ConfigureAwait(false);
+                    },
+                    Tags = [WellKnownPipelineTags.BuildCompute],
+                    RequiredBySteps = [WellKnownPipelineSteps.Build],
+                    DependsOnSteps = [WellKnownPipelineSteps.BuildPrereq],
+                    Resource = builder.Resource
+                };
+                steps.Add(buildStep);
+            }
+
+            if (builder.Resource.RequiresImageBuildAndPush())
+            {
+                var pushStep = new PipelineStep
+                {
+                    Name = $"push-{builder.Resource.Name}",
+                    Action = ctx => PipelineStepHelpers.PushImageToRegistryAsync(builder.Resource, ctx),
+                    Tags = [WellKnownPipelineTags.PushContainerImage],
+                    RequiredBySteps = [WellKnownPipelineSteps.Push],
+                    Resource = builder.Resource
+                };
+                steps.Add(pushStep);
+            }
+
+            return steps;
+        }), ResourceAnnotationMutationBehavior.Replace);
+
+        return builder.WithAnnotation(new PipelineConfigurationAnnotation(context =>
+        {
+            var buildSteps = context.GetSteps(builder.Resource, WellKnownPipelineTags.BuildCompute);
+            var pushSteps = context.GetSteps(builder.Resource, WellKnownPipelineTags.PushContainerImage);
+
+            pushSteps.DependsOn(buildSteps);
+            pushSteps.DependsOn(WellKnownPipelineSteps.PushPrereq);
+        }), ResourceAnnotationMutationBehavior.Append);
+    }
+
+    /// <summary>
     /// Adds a container resource to the application. Uses the "latest" tag.
     /// </summary>
     /// <param name="builder">The <see cref="IDistributedApplicationBuilder"/>.</param>
     /// <param name="name">The name of the resource.</param>
     /// <param name="image">The container image name. The tag is assumed to be "latest".</param>
     /// <returns>The <see cref="IResourceBuilder{T}"/> for chaining.</returns>
+    [AspireExport("addContainer", Description = "Adds a container resource")]
     public static IResourceBuilder<ContainerResource> AddContainer(this IDistributedApplicationBuilder builder, [ResourceName] string name, string image)
     {
         ArgumentNullException.ThrowIfNull(builder);
@@ -79,6 +149,8 @@ public static class ContainerResourceBuilderExtensions
     /// </code>
     /// </example>
     /// </remarks>
+    // Note: [AspireExport] is on CoreExports.WithVolume which reorders parameters
+    // so the required 'target' comes before the optional 'name' - better for polyglot APIs.
     public static IResourceBuilder<T> WithVolume<T>(this IResourceBuilder<T> builder, string? name, string target, bool isReadOnly = false) where T : ContainerResource
     {
         ArgumentNullException.ThrowIfNull(builder);
@@ -174,6 +246,7 @@ public static class ContainerResourceBuilderExtensions
     /// </code>
     /// </example>
     /// </remarks>
+    [AspireExport("withBindMount", Description = "Adds a bind mount")]
     public static IResourceBuilder<T> WithBindMount<T>(this IResourceBuilder<T> builder, string source, string target, bool isReadOnly = false) where T : ContainerResource
     {
         ArgumentNullException.ThrowIfNull(builder);
@@ -193,6 +266,7 @@ public static class ContainerResourceBuilderExtensions
     /// <param name="builder">The resource builder.</param>
     /// <param name="entrypoint">The new entrypoint for the container.</param>
     /// <returns>The <see cref="IResourceBuilder{T}"/>.</returns>
+    [AspireExport("withEntrypoint", Description = "Sets the container entrypoint")]
     public static IResourceBuilder<T> WithEntrypoint<T>(this IResourceBuilder<T> builder, string entrypoint) where T : ContainerResource
     {
         ArgumentNullException.ThrowIfNull(builder);
@@ -209,6 +283,7 @@ public static class ContainerResourceBuilderExtensions
     /// <param name="builder">Builder for the container resource.</param>
     /// <param name="tag">Tag value.</param>
     /// <returns>The <see cref="IResourceBuilder{T}"/>.</returns>
+    [AspireExport("withImageTag", Description = "Sets the container image tag")]
     public static IResourceBuilder<T> WithImageTag<T>(this IResourceBuilder<T> builder, string tag) where T : ContainerResource
     {
         ArgumentNullException.ThrowIfNull(builder);
@@ -239,6 +314,7 @@ public static class ContainerResourceBuilderExtensions
     /// <param name="builder">Builder for the container resource.</param>
     /// <param name="registry">Registry value.</param>
     /// <returns>The <see cref="IResourceBuilder{T}"/>.</returns>
+    [AspireExport("withImageRegistry", Description = "Sets the container image registry")]
     public static IResourceBuilder<T> WithImageRegistry<T>(this IResourceBuilder<T> builder, string? registry) where T : ContainerResource
     {
         ArgumentNullException.ThrowIfNull(builder);
@@ -260,6 +336,7 @@ public static class ContainerResourceBuilderExtensions
     /// <param name="image">Image value.</param>
     /// <param name="tag">Tag value.</param>
     /// <returns>The <see cref="IResourceBuilder{T}"/>.</returns>
+    [AspireExport("withImage", Description = "Sets the container image")]
     public static IResourceBuilder<T> WithImage<T>(this IResourceBuilder<T> builder, string image, string? tag = null) where T : ContainerResource
     {
         ArgumentNullException.ThrowIfNull(builder);
@@ -350,6 +427,7 @@ public static class ContainerResourceBuilderExtensions
     /// <param name="builder">Builder for the container resource.</param>
     /// <param name="args">The arguments to be passed to the container runtime run command when the container resource is started.</param>
     /// <returns>The <see cref="IResourceBuilder{T}"/>.</returns>
+    [AspireExport("withContainerRuntimeArgs", Description = "Adds runtime arguments for the container")]
     public static IResourceBuilder<T> WithContainerRuntimeArgs<T>(this IResourceBuilder<T> builder, params string[] args) where T : ContainerResource
     {
         ArgumentNullException.ThrowIfNull(builder);
@@ -418,6 +496,7 @@ public static class ContainerResourceBuilderExtensions
     /// </code>
     /// </example>
     /// </remarks>
+    [AspireExport("withLifetime", Description = "Sets the lifetime behavior of the container resource")]
     public static IResourceBuilder<T> WithLifetime<T>(this IResourceBuilder<T> builder, ContainerLifetime lifetime) where T : ContainerResource
     {
         ArgumentNullException.ThrowIfNull(builder);
@@ -432,6 +511,7 @@ public static class ContainerResourceBuilderExtensions
     /// <param name="builder">Builder for the container resource.</param>
     /// <param name="pullPolicy">The pull policy behavior for the container resource.</param>
     /// <returns>The <see cref="IResourceBuilder{T}"/>.</returns>
+    [AspireExport("withImagePullPolicy", Description = "Sets the container image pull policy")]
     public static IResourceBuilder<T> WithImagePullPolicy<T>(this IResourceBuilder<T> builder, ImagePullPolicy pullPolicy) where T : ContainerResource
     {
         ArgumentNullException.ThrowIfNull(builder);
@@ -456,7 +536,7 @@ public static class ContainerResourceBuilderExtensions
     }
 
     /// <summary>
-    /// Causes .NET Aspire to build the specified container image from a Dockerfile.
+    /// Causes Aspire to build the specified container image from a Dockerfile.
     /// </summary>
     /// <typeparam name="T">Type parameter specifying any type derived from <see cref="ContainerResource"/>/</typeparam>
     /// <param name="builder">The <see cref="IResourceBuilder{T}"/>.</param>
@@ -508,19 +588,42 @@ public static class ContainerResourceBuilderExtensions
         var imageTag = ImageNameGenerator.GenerateImageTag(builder);
         var annotation = new DockerfileBuildAnnotation(fullyQualifiedContextPath, fullyQualifiedDockerfilePath, stage);
 
+        // Add default container build options annotation that uses the DockerfileBuildAnnotation's ImageName and ImageTag
+        var defaultContainerBuildOptions = new ContainerBuildOptionsCallbackAnnotation(context =>
+        {
+            // Use DockerfileBuildAnnotation values if set, otherwise fall back to resource name
+            if (context.Resource.TryGetLastAnnotation<DockerfileBuildAnnotation>(out var dockerfileAnnotation))
+            {
+                context.LocalImageName = dockerfileAnnotation.ImageName ?? context.Resource.Name;
+                context.LocalImageTag = dockerfileAnnotation.ImageTag ?? "latest";
+                context.TargetPlatform = ContainerTargetPlatform.LinuxAmd64;
+            }
+            else
+            {
+                context.LocalImageName = context.Resource.Name;
+                context.LocalImageTag = "latest";
+                context.TargetPlatform = ContainerTargetPlatform.LinuxAmd64;
+            }
+            context.TargetPlatform = ContainerTargetPlatform.LinuxAmd64;
+        });
+
         // If there's already a ContainerImageAnnotation, don't overwrite it.
         // Instead, store the generated image name and tag on the DockerfileBuildAnnotation.
         if (builder.Resource.Annotations.OfType<ContainerImageAnnotation>().LastOrDefault() is { })
         {
             annotation.ImageName = imageName;
             annotation.ImageTag = imageTag;
-            return builder.WithAnnotation(annotation, ResourceAnnotationMutationBehavior.Replace);
+            return builder.WithAnnotation(annotation, ResourceAnnotationMutationBehavior.Replace)
+                          .WithAnnotation(defaultContainerBuildOptions)
+                          .EnsureBuildAndPushPipelineAnnotations();
         }
 
         return builder.WithAnnotation(annotation, ResourceAnnotationMutationBehavior.Replace)
+                      .WithAnnotation(defaultContainerBuildOptions)
                       .WithImageRegistry(registry: null)
                       .WithImage(imageName)
-                      .WithImageTag(imageTag);
+                      .WithImageTag(imageTag)
+                      .EnsureBuildAndPushPipelineAnnotations();
     }
 
     /// <summary>
@@ -615,8 +718,9 @@ public static class ContainerResourceBuilderExtensions
         var fullyQualifiedContextPath = Path.GetFullPath(contextPath, builder.ApplicationBuilder.AppHostDirectory)
                                            .TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
 
-        // Create a unique temporary Dockerfile path for this resource
-        var tempDockerfilePath = Path.Combine(Path.GetTempPath(), $"Dockerfile.{builder.Resource.Name}.{Guid.NewGuid():N}");
+        // Create a unique temporary Dockerfile path for this resource using the directory service
+        var directoryService = builder.ApplicationBuilder.FileSystemService;
+        var tempDockerfilePath = directoryService.TempDirectory.CreateTempFile().Path;
 
         var imageName = ImageNameGenerator.GenerateImageName(builder);
         var imageTag = ImageNameGenerator.GenerateImageTag(builder);
@@ -626,19 +730,42 @@ public static class ContainerResourceBuilderExtensions
             DockerfileFactory = dockerfileFactory
         };
 
+        // Add default container build options annotation that uses the DockerfileBuildAnnotation's ImageName and ImageTag
+        var defaultContainerBuildOptions = new ContainerBuildOptionsCallbackAnnotation(context =>
+        {
+            // Use DockerfileBuildAnnotation values if set, otherwise fall back to resource name
+            if (context.Resource.TryGetLastAnnotation<DockerfileBuildAnnotation>(out var dockerfileAnnotation))
+            {
+                context.LocalImageName = dockerfileAnnotation.ImageName ?? context.Resource.Name;
+                context.LocalImageTag = dockerfileAnnotation.ImageTag ?? "latest";
+                context.TargetPlatform = ContainerTargetPlatform.LinuxAmd64;
+            }
+            else
+            {
+                context.LocalImageName = context.Resource.Name;
+                context.LocalImageTag = "latest";
+                context.TargetPlatform = ContainerTargetPlatform.LinuxAmd64;
+            }
+            context.TargetPlatform = ContainerTargetPlatform.LinuxAmd64;
+        });
+
         // If there's already a ContainerImageAnnotation, don't overwrite it.
         // Instead, store the generated image name and tag on the DockerfileBuildAnnotation.
         if (builder.Resource.Annotations.OfType<ContainerImageAnnotation>().LastOrDefault() is { })
         {
             annotation.ImageName = imageName;
             annotation.ImageTag = imageTag;
-            return builder.WithAnnotation(annotation, ResourceAnnotationMutationBehavior.Replace);
+            return builder.WithAnnotation(annotation, ResourceAnnotationMutationBehavior.Replace)
+                          .WithAnnotation(defaultContainerBuildOptions, ResourceAnnotationMutationBehavior.Append)
+                          .EnsureBuildAndPushPipelineAnnotations();
         }
 
         return builder.WithAnnotation(annotation, ResourceAnnotationMutationBehavior.Replace)
+                      .WithAnnotation(defaultContainerBuildOptions, ResourceAnnotationMutationBehavior.Append)
                       .WithImageRegistry(registry: null)
                       .WithImage(imageName)
-                      .WithImageTag(imageTag);
+                      .WithImageTag(imageTag)
+                      .EnsureBuildAndPushPipelineAnnotations();
     }
 
     /// <summary>
@@ -846,6 +973,7 @@ public static class ContainerResourceBuilderExtensions
     /// <param name="builder">The resource builder for the container resource.</param>
     /// <param name="name">The desired container name. Must be a valid container name or your runtime will report an error.</param>
     /// <returns>The <see cref="IResourceBuilder{T}"/>.</returns>
+    [AspireExport("withContainerName", Description = "Sets the container name")]
     public static IResourceBuilder<T> WithContainerName<T>(this IResourceBuilder<T> builder, string name) where T : ContainerResource
     {
         ArgumentNullException.ThrowIfNull(builder);
@@ -943,7 +1071,7 @@ public static class ContainerResourceBuilderExtensions
 
         if (value.Resource.Secret)
         {
-            throw new InvalidOperationException("Cannot add secret parameter as a build argument. Use WithSecretBuildArg instead.");
+            throw new InvalidOperationException("Cannot add secret parameter as a build argument. Use WithBuildSecret instead.");
         }
 
         return builder.WithBuildArg(name, value.Resource);
@@ -992,7 +1120,7 @@ public static class ContainerResourceBuilderExtensions
 
         if (annotation is null)
         {
-            throw new InvalidOperationException("The resource does not have a Dockerfile build annotation. Call WithDockerfile before calling WithSecretBuildArg.");
+            throw new InvalidOperationException("The resource does not have a Dockerfile build annotation. Call WithDockerfile before calling WithBuildSecret.");
         }
 
         annotation.BuildSecrets[name] = value.Resource;
@@ -1001,21 +1129,26 @@ public static class ContainerResourceBuilderExtensions
     }
 
     /// <summary>
-    /// Adds a <see cref="ExecutableCertificateTrustCallbackAnnotation"/> to the resource annotations to associate a callback that is
-    /// invoked when a container resource needs to configure itself for custom certificate trust. This is only supported in run mode;
-    /// certificate trust customization is not supported in publish or deploy.
+    /// Adds a <see cref="ContainerCertificatePathsAnnotation"/> to the resource that allows overriding the default paths in the container used for certificate trust.
+    /// Custom certificate trust is only supported at run time.
     /// </summary>
     /// <typeparam name="TResource">The type of the resource.</typeparam>
     /// <param name="builder">The resource builder.</param>
-    /// <param name="callback">The callback to invoke when a resource needs to configure itself for custom certificate trust.</param>
+    /// <param name="customCertificatesDestination">The destination path in the container where custom certificates will be copied to. If not specified, defaults to <c>/usr/local/share/ca-certificates/aspire-custom-certs/</c>.</param>
+    /// <param name="defaultCertificateBundlePaths">List of default certificate bundle paths in the container that will be replaced in <see cref="CertificateTrustScope.Override"/> or <see cref="CertificateTrustScope.System"/> modes. If not specified, defaults to <c>/etc/ssl/certs/ca-certificates.crt</c> for Linux containers.</param>
+    /// <param name="defaultCertificateDirectoryPaths">List of default certificate directory paths in the container that may be appended to the custom certificates directory in <see cref="CertificateTrustScope.Append"/> mode. If not specified, defaults to <c>/usr/local/share/ca-certificates/</c> for Linux containers.</param>
     /// <returns>The updated resource builder.</returns>
-    public static IResourceBuilder<TResource> WithContainerCertificateTrustCallback<TResource>(this IResourceBuilder<TResource> builder, Func<ContainerCertificateTrustCallbackAnnotationContext, Task> callback)
+    public static IResourceBuilder<TResource> WithContainerCertificatePaths<TResource>(this IResourceBuilder<TResource> builder, string? customCertificatesDestination = null, List<string>? defaultCertificateBundlePaths = null, List<string>? defaultCertificateDirectoryPaths = null)
         where TResource : ContainerResource
     {
         ArgumentNullException.ThrowIfNull(builder);
-        ArgumentNullException.ThrowIfNull(callback);
 
-        return builder.WithAnnotation(new ContainerCertificateTrustCallbackAnnotation(callback), ResourceAnnotationMutationBehavior.Replace);
+        return builder.WithAnnotation(new ContainerCertificatePathsAnnotation
+        {
+            CustomCertificatesDestination = customCertificatesDestination,
+            DefaultCertificateBundles = defaultCertificateBundlePaths,
+            DefaultCertificateDirectories = defaultCertificateDirectoryPaths,
+        }, ResourceAnnotationMutationBehavior.Replace);
     }
 
     /// <summary>
@@ -1211,7 +1344,6 @@ public static class ContainerResourceBuilderExtensions
     /// The user needs to be careful to ensure that container endpoints are using unique ports when disabling proxy support as by default for proxy-less
     /// endpoints, Aspire will allocate the internal container port as the host port, which will increase the chance of port conflicts.
     /// </remarks>
-    [Experimental("ASPIREPROXYENDPOINTS001", UrlFormat = "https://aka.ms/aspire/diagnostics/{0}")]
     public static IResourceBuilder<T> WithEndpointProxySupport<T>(this IResourceBuilder<T> builder, bool proxyEnabled) where T : ContainerResource
     {
         ArgumentNullException.ThrowIfNull(builder);
@@ -1372,6 +1504,72 @@ public static class ContainerResourceBuilderExtensions
             callback(context);
             return Task.CompletedTask;
         }, stage);
+    }
+
+    /// <summary>
+    /// Configures custom base images for generated Dockerfiles.
+    /// </summary>
+    /// <typeparam name="T">The type of resource.</typeparam>
+    /// <param name="builder">The resource builder.</param>
+    /// <param name="buildImage">The base image to use for the build stage. If null, uses the default build image.</param>
+    /// <param name="runtimeImage">The base image to use for the runtime stage. If null, uses the default runtime image.</param>
+    /// <returns>The <see cref="IResourceBuilder{T}"/>.</returns>
+    /// <remarks>
+    /// <para>
+    /// This extension method allows customization of the base images used in generated Dockerfiles.
+    /// For multi-stage Dockerfiles (e.g., Python with UV), you can specify separate build and runtime images.
+    /// </para>
+    /// <example>
+    /// Specify custom base images for a Python application:
+    /// <code language="csharp">
+    /// var builder = DistributedApplication.CreateBuilder(args);
+    ///
+    /// builder.AddPythonApp("myapp", "path/to/app", "main.py")
+    ///        .WithDockerfileBaseImage(
+    ///            buildImage: "ghcr.io/astral-sh/uv:python3.12-bookworm-slim",
+    ///            runtimeImage: "python:3.12-slim-bookworm");
+    ///
+    /// builder.Build().Run();
+    /// </code>
+    /// </example>
+    /// </remarks>
+    [Experimental("ASPIREDOCKERFILEBUILDER001", UrlFormat = "https://aka.ms/aspire/diagnostics/{0}")]
+    public static IResourceBuilder<T> WithDockerfileBaseImage<T>(this IResourceBuilder<T> builder, string? buildImage = null, string? runtimeImage = null) where T : IResource
+    {
+        ArgumentNullException.ThrowIfNull(builder);
+
+        if (buildImage is null && runtimeImage is null)
+        {
+            throw new ArgumentException($"At least one of {nameof(buildImage)} or {nameof(runtimeImage)} must be specified.", nameof(buildImage));
+        }
+
+        return builder.WithAnnotation(new DockerfileBaseImageAnnotation
+        {
+            BuildImage = buildImage,
+            RuntimeImage = runtimeImage
+        }, ResourceAnnotationMutationBehavior.Replace);
+    }
+
+    /// <summary>
+    /// Adds a network alias to container resource.
+    /// </summary>
+    /// <typeparam name="T">The type of container resource.</typeparam>
+    /// <param name="builder">The resource builder for the container resource.</param>
+    /// <param name="alias">The network alias for the container.</param>
+    /// <returns>The <see cref="IResourceBuilder{T}"/>.</returns>
+    /// <remarks>
+    /// <para>
+    /// Network aliases enable DNS resolution of the container on the network by custom names.
+    /// By default, containers are accessible on the network using their resource name as a DNS alias.
+    /// This method allows adding additional aliases for the same container.
+    /// </para>
+    /// <para>
+    /// Multiple aliases can be added by calling this method multiple times.
+    /// </para>
+    /// </remarks>
+    public static IResourceBuilder<T> WithContainerNetworkAlias<T>(this IResourceBuilder<T> builder, string alias) where T : ContainerResource
+    {
+        return builder.WithAnnotation(new ContainerNetworkAliasAnnotation(alias) { Network = KnownNetworkIdentifiers.DefaultAspireContainerNetwork });
     }
 }
 

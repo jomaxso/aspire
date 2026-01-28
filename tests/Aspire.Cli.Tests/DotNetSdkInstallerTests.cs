@@ -269,10 +269,10 @@ public class DotNetSdkInstallerTests
         // Test the error message format with placeholders
         var message = string.Format(CultureInfo.InvariantCulture,
             ErrorStrings.ResourceManager.GetString("MinimumSdkVersionNotMet", CultureInfo.GetCultureInfo("en-US"))!,
-            "10.0.100-rc.2.25502.107",
+            "10.0.100",
             "(not found)");
 
-        Assert.Equal("The Aspire CLI requires .NET SDK version 10.0.100-rc.2.25502.107 or later. Detected: (not found).", message);
+        Assert.Equal("The Aspire CLI requires .NET SDK version 10.0.100 or later. Detected: (not found).", message);
     }
 
     [Fact]
@@ -280,8 +280,8 @@ public class DotNetSdkInstallerTests
     {
         // Test the logic we added for allowing .NET 10 prereleases
         var installedVersion = SemVersion.Parse("10.0.100-preview.1.25463.5", SemVersionStyles.Strict);
-        var requiredVersion = SemVersion.Parse("10.0.100-rc.2.25502.107", SemVersionStyles.Strict);
-        var requiredVersionString = "10.0.100-rc.2.25502.107";
+        var requiredVersion = SemVersion.Parse("10.0.100", SemVersionStyles.Strict);
+        var requiredVersionString = "10.0.100";
 
         // Use reflection to access the private method
         var method = typeof(DotNetSdkInstaller).GetMethod("MeetsMinimumRequirement",
@@ -296,8 +296,8 @@ public class DotNetSdkInstallerTests
     {
         // Test with a more recent .NET 10 prerelease
         var installedVersion = SemVersion.Parse("10.1.0-preview.2.25999.99", SemVersionStyles.Strict);
-        var requiredVersion = SemVersion.Parse("10.0.100-rc.2.25502.107", SemVersionStyles.Strict);
-        var requiredVersionString = "10.0.100-rc.2.25502.107";
+        var requiredVersion = SemVersion.Parse("10.0.100", SemVersionStyles.Strict);
+        var requiredVersionString = "10.0.100";
 
         // Use reflection to access the private method
         var method = typeof(DotNetSdkInstaller).GetMethod("MeetsMinimumRequirement",
@@ -312,8 +312,8 @@ public class DotNetSdkInstallerTests
     {
         // Test that .NET 9 is rejected
         var installedVersion = SemVersion.Parse("9.0.999", SemVersionStyles.Strict);
-        var requiredVersion = SemVersion.Parse("10.0.100-rc.2.25502.107", SemVersionStyles.Strict);
-        var requiredVersionString = "10.0.100-rc.2.25502.107";
+        var requiredVersion = SemVersion.Parse("10.0.100", SemVersionStyles.Strict);
+        var requiredVersionString = "10.0.100";
 
         // Use reflection to access the private method
         var method = typeof(DotNetSdkInstaller).GetMethod("MeetsMinimumRequirement",
@@ -352,6 +352,33 @@ public class DotNetSdkInstallerTests
                 new KeyValuePair<string, string?>("overrideMinimumSdkVersion", overrideVersion)
             })
             .Build();
+    }
+
+    [Fact]
+    public void EmbeddedScripts_AreAccessible()
+    {
+        // Verify that the embedded scripts can be accessed from the assembly
+        var assembly = typeof(DotNetSdkInstaller).Assembly;
+        
+        var bashScriptResource = assembly.GetManifestResourceStream("Aspire.Cli.Resources.dotnet-install.sh");
+        var powershellScriptResource = assembly.GetManifestResourceStream("Aspire.Cli.Resources.dotnet-install.ps1");
+        
+        Assert.NotNull(bashScriptResource);
+        Assert.NotNull(powershellScriptResource);
+        
+        // Verify scripts have content
+        Assert.True(bashScriptResource.Length > 0, "Bash script should not be empty");
+        Assert.True(powershellScriptResource.Length > 0, "PowerShell script should not be empty");
+        
+        // Verify scripts start with expected headers
+        using var bashReader = new StreamReader(bashScriptResource);
+        var firstLine = bashReader.ReadLine();
+        Assert.NotNull(firstLine);
+        Assert.Contains("#!/", firstLine);
+        
+        using var powershellReader = new StreamReader(powershellScriptResource);
+        var content = powershellReader.ReadToEnd();
+        Assert.Contains("dotnet", content, StringComparison.OrdinalIgnoreCase);
     }
 }
 

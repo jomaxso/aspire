@@ -4,6 +4,7 @@
 using Aspire.Hosting.ApplicationModel;
 using Aspire.Hosting.Utils;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Hosting;
 
 namespace Aspire.Hosting.Azure.Tests;
 
@@ -13,7 +14,7 @@ public class AzureResourceOptionsTests(ITestOutputHelper output)
     /// Ensures that an AzureProvisioningOptions can be configured to modify the ProvisioningBuildOptions
     /// used when building the bicep for an Azure resource.
     ///
-    /// This uses the .NET Aspire v8.x naming policy, which always calls toLower, appends a unique string with no separator,
+    /// This uses the Aspire v8.x naming policy, which always calls toLower, appends a unique string with no separator,
     /// and uses a max of 24 characters.
     /// </summary>
     [Fact]
@@ -22,7 +23,7 @@ public class AzureResourceOptionsTests(ITestOutputHelper output)
         var tempDir = Directory.CreateTempSubdirectory();
         var outputPath = Path.Combine(tempDir.FullName, "aspire-manifest.json");
 
-        using (var builder = TestDistributedApplicationBuilder.Create("Publishing:Publisher=manifest", "--output-path", outputPath))
+        using (var builder = TestDistributedApplicationBuilder.Create(DistributedApplicationOperation.Publish, outputPath, step: "publish-manifest"))
         {
             builder.Services.Configure<AzureProvisioningOptions>(options =>
             {
@@ -38,6 +39,7 @@ public class AzureResourceOptionsTests(ITestOutputHelper output)
 
             using var app = builder.Build();
             await app.StartAsync();
+            await app.WaitForShutdownAsync();
 
             var sbBicep = await File.ReadAllTextAsync(Path.Combine(tempDir.FullName, "sb.module.bicep"));
 
@@ -45,9 +47,6 @@ public class AzureResourceOptionsTests(ITestOutputHelper output)
 
             await Verify(sbBicep, extension: "bicep")
                 .AppendContentAsFile(sqlBicep, "bicep");
-                
-
-            await app.StopAsync();
         }
 
         try

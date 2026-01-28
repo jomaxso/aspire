@@ -13,6 +13,7 @@ namespace Aspire.Hosting.ApplicationModel;
 /// <param name="resource">The resource.</param>
 /// <param name="urls">The URLs for the resource.</param>
 /// <param name="cancellationToken">A <see cref="CancellationToken"/>.</param>
+[AspireExport(ExposeProperties = true)]
 public class ResourceUrlsCallbackContext(DistributedApplicationExecutionContext executionContext, IResource resource, List<ResourceUrlAnnotation>? urls = null, CancellationToken cancellationToken = default)
 {
     /// <summary>
@@ -24,12 +25,24 @@ public class ResourceUrlsCallbackContext(DistributedApplicationExecutionContext 
     /// Gets an endpoint reference from <see cref="Resource"/> for the specified endpoint name.<br/>
     /// If <see cref="Resource"/> does not implement <see cref="IResourceWithEndpoints"/> then returns <c>null</c>.
     /// </summary>
-    /// <param name="name"></param>
-    /// <returns></returns>
+    /// <param name="name">The name of the endpoint.</param>
     public EndpointReference? GetEndpoint(string name) =>
         Resource switch
         {
             IResourceWithEndpoints resourceWithEndpoints => resourceWithEndpoints.GetEndpoint(name),
+            _ => null
+        };
+
+    /// <summary>
+    /// Gets an endpoint reference from <see cref="Resource"/> for the specified endpoint name.<br/>
+    /// If <see cref="Resource"/> does not implement <see cref="IResourceWithEndpoints"/> then returns <c>null</c>.
+    /// </summary>
+    /// <param name="name">The name of the endpoint.</param>
+    /// <param name="contextNetworkID">The identifier of the network that serves as the context for the endpoint reference.</param>
+    public EndpointReference? GetEndpoint(string name, NetworkIdentifier contextNetworkID) =>
+        Resource switch
+        {
+            IResourceWithEndpoints resourceWithEndpoints => resourceWithEndpoints.GetEndpoint(name, contextNetworkID),
             _ => null
         };
 

@@ -1,10 +1,8 @@
-// Licensed to the .NET Foundation under one or more agreements.
+﻿// Licensed to the .NET Foundation under one or more agreements.
 // The .NET Foundation licenses this file to you under the MIT license.
 
 using Aspire.Components.ConformanceTests;
-using Aspire.TestUtilities;
 using Azure.Identity;
-using Microsoft.DotNet.RemoteExecutor;
 using Microsoft.Extensions.AI;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
@@ -84,14 +82,17 @@ public class ConformanceTests : ConformanceTests<IChatClient, AzureOpenAISetting
         }
     }
 
-    [Fact]
-    public void TracingEnablesTheRightActivitySource()
-        => RemoteExecutor.Invoke(() => ActivitySourceTest(key: null)).Dispose();
+    public ConformanceTests(ITestOutputHelper? output = null) : base(output)
+    {
+    }
 
     [Fact]
-    [QuarantinedTest("https://github.com/dotnet/aspire/issues/9916")]
+    public void TracingEnablesTheRightActivitySource()
+        => RemoteInvokeWithLogging(() => new ConformanceTests().ActivitySourceTest(key: null), Output);
+
+    [Fact]
     public void TracingEnablesTheRightActivitySource_Keyed()
-        => RemoteExecutor.Invoke(() => ActivitySourceTest(key: "key")).Dispose();
+        => RemoteInvokeWithLogging(() => new ConformanceTests().ActivitySourceTest(key: "key"), Output);
 
     protected override void SetHealthCheck(AzureOpenAISettings options, bool enabled)
         => throw new NotImplementedException();
