@@ -179,6 +179,27 @@ internal sealed class AddCommand : BaseCommand
                 : ProfilingTelemetry.Values.AddPackageMatchKindNone;
 
             if (filteredPackagesWithShortName.Count == 0 && integrationName is not null && version is not null && !_hostEnvironment.SupportsInteractiveInput)
+            var exactPackageIdMatches = Array.Empty<(string FriendlyName, NuGetPackage Package, PackageChannel Channel)>();
+
+            if (!filteredPackagesWithShortName.Any() && integrationName is not null)
+            {
+                exactPackageIdMatches =
+                [
+                    .. (await _integrationPackageSearchService.GetPackagesByExactIdWithChannelsAsync(
+                        effectiveAppHostProjectFile.Directory!,
+                        integrationName,
+                        configuredChannel,
+                        cancellationToken))
+                    .Select(IntegrationPackageSearchService.GenerateFriendlyName)
+                ];
+
+                if (exactPackageIdMatches.Length > 0)
+                {
+                    filteredPackagesWithShortName = exactPackageIdMatches;
+                }
+            }
+
+            if (!filteredPackagesWithShortName.Any() && integrationName is not null && version is not null && !_hostEnvironment.SupportsInteractiveInput)
             {
                 throw new EmptyChoicesException(string.Format(CultureInfo.CurrentCulture, AddCommandStrings.SpecifiedVersionRequiresExactPackageMatch, integrationName));
             }
