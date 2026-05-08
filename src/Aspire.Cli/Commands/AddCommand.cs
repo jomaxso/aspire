@@ -114,6 +114,12 @@ internal sealed class AddCommand : BaseCommand
                 return AddCommandFailure(CliExitCodes.FailedToFindProject);
             }
 
+            if (TryGetMissingLocalNuGetSource(source, effectiveAppHostProjectFile.Directory!, out var missingSource))
+            {
+                InteractionService.DisplayError(string.Format(CultureInfo.CurrentCulture, AddCommandStrings.SourceDoesNotExist, missingSource));
+                return ExitCodeConstants.FailedToAddPackage;
+            }
+
             // Get the appropriate project handler
             var project = _projectFactory.GetProject(effectiveAppHostProjectFile);
             addActivity.SetAppHostLanguage(project.LanguageId);
@@ -169,6 +175,12 @@ internal sealed class AddCommand : BaseCommand
             if (packagesWithShortName.Count == 0)
             {
                 return AddCommandFailure(CliExitCodes.FailedToAddPackage, AddCommandStrings.NoPackagesFound);
+            }
+
+            if (integrationName is null && !_hostEnvironment.SupportsInteractiveInput)
+            {
+                InteractionService.DisplayError(AddCommandStrings.IntegrationNameRequiredInNonInteractiveMode);
+                return ExitCodeConstants.FailedToAddPackage;
             }
 
             var filteredPackagesWithShortName = packagesWithShortName
@@ -278,12 +290,19 @@ internal sealed class AddCommand : BaseCommand
                 Source = source
             };
 
-            if (!string.IsNullOrWhiteSpace(source) && project.LanguageId == KnownLanguageId.CSharp)
+            if (project.LanguageId == KnownLanguageId.CSharp)
             {
-                await NuGetConfigMerger.AddPackageSourceMappingAsync(
-                    effectiveAppHostProjectFile.Directory!,
-                    new PackageMapping(PackageMapping.AllPackages, source),
-                    cancellationToken);
+                if (string.IsNullOrWhiteSpace(source))
+                {
+                    await AddSelectedChannelSourcesAsync(effectiveAppHostProjectFile.Directory!, selectedNuGetPackage.Channel, cancellationToken);
+                }
+                else
+                {
+                    await NuGetConfigMerger.AddPackageSourceMappingAsync(
+                        effectiveAppHostProjectFile.Directory!,
+                        new PackageMapping(PackageMapping.AllPackages, source),
+                        cancellationToken);
+                }
             }
 
             // Stop any running AppHost instance before adding the package.
@@ -366,6 +385,74 @@ internal sealed class AddCommand : BaseCommand
         finally
         {
             addActivity.Dispose();
+        }
+    }
+
+    private static async Task AddSelectedChannelSourcesAsync(DirectoryInfo projectDirectory, PackageChannel channel, CancellationToken cancellationToken)
+    {
+        if (channel.Mappings is not { Length: > 0 } mappings)
+        {
+            return;
+        }
+
+        foreach (var mapping in mappings)
+        {
+            await NuGetConfigMerger.AddPackageSourceMappingAsync(projectDirectory, mapping, cancellationToken);
+        }
+    }
+
+    private static bool TryGetMissingLocalNuGetSource(string? source, DirectoryInfo workingDirectory, out string missingSource)
+    {
+        missingSource = string.Empty;
+
+        if (string.IsNullOrWhiteSpace(source))
+        {
+            return false;
+        }
+
+        var sourcePath = GetLocalNuGetSourcePath(source, workingDirectory);
+        if (sourcePath is null || Directory.Exists(sourcePath))
+        {
+            return false;
+        }
+
+        missingSource = sourcePath;
+
+        return true;
+    }
+
+    private static string? GetLocalNuGetSourcePath(string source, DirectoryInfo workingDirectory)
+    {
+        if (Path.IsPathFullyQualified(source))
+        {
+            return source;
+        }
+
+        if (Uri.TryCreate(source, UriKind.Absolute, out var sourceUri))
+        {
+            return sourceUri.IsFile ? sourceUri.LocalPath : null;
+        }
+
+        if (source.IndexOf(Path.DirectorySeparatorChar) < 0 && source.IndexOf(Path.AltDirectorySeparatorChar) < 0)
+        {
+            return null;
+        }
+
+        try
+        {
+            return Path.GetFullPath(Path.Combine(workingDirectory.FullName, source));
+        }
+        catch (ArgumentException)
+        {
+            return source;
+        }
+        catch (NotSupportedException)
+        {
+            return source;
+        }
+        catch (PathTooLongException)
+        {
+            return source;
         }
     }
 
