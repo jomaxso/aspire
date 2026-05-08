@@ -82,7 +82,7 @@ internal class PackageChannel(string name, PackageChannelQuality quality, Packag
 
         var packages = packageResults
             .SelectMany(p => p)
-            .DistinctBy(p => $"{p.Id}-{p.Version}");
+            .DistinctBy(p => $"{p.Id}\0{p.Version}");
 
         // When doing a `dotnet package search` the results may include stable packages even when searching for
         // prerelease packages. This filters out this noise.
@@ -117,7 +117,7 @@ internal class PackageChannel(string name, PackageChannelQuality quality, Packag
 
         var packages = packageResults
             .SelectMany(p => p)
-            .DistinctBy(p => $"{p.Id}-{p.Version}");
+            .DistinctBy(p => $"{p.Id}\0{p.Version}");
 
         // When doing a `dotnet package search` the results may include stable packages even when searching for
         // prerelease packages. This filters out this noise.
@@ -231,7 +231,7 @@ internal class PackageChannel(string name, PackageChannelQuality quality, Packag
 
         var packages = packageResults
             .SelectMany(p => p)
-            .DistinctBy(p => $"{p.Id}-{p.Version}");
+            .DistinctBy(p => $"{p.Id}\0{p.Version}");
 
         var filteredPackages = packages.Where(p => MatchesRequestedQuality(p.Version, Quality));
 
@@ -282,7 +282,7 @@ internal class PackageChannel(string name, PackageChannelQuality quality, Packag
 
         var packages = packageResults
             .SelectMany(p => p)
-            .DistinctBy(p => $"{p.Id}-{p.Version}");
+            .DistinctBy(p => $"{p.Id}\0{p.Version}");
 
         // In the event that we have no stable packages we fallback to
         // returning prerelease packages. Example a package that is currently
@@ -365,7 +365,7 @@ internal class PackageChannel(string name, PackageChannelQuality quality, Packag
 
         var packages = packageResults
             .SelectMany(p => p)
-            .DistinctBy(p => $"{p.Id}-{p.Version}");
+            .DistinctBy(p => $"{p.Id}\0{p.Version}");
 
         // In the event that we have no stable packages we fallback to
         // returning prerelease packages. Example a package that is currently
