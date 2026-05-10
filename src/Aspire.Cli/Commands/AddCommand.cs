@@ -176,7 +176,7 @@ internal sealed class AddCommand : BaseCommand
             {
                 var discoveredPackages = await InteractionService.ShowStatusAsync(
                     AddCommandStrings.SearchingForAspirePackages,
-                    async () => await _integrationPackageSearchService.GetIntegrationPackagesWithChannelsAsync(effectiveAppHostProjectFile.Directory!, configuredChannel, discoveryScope, cancellationToken));
+                    async () => await _integrationPackageSearchService.GetIntegrationPackagesWithChannelsAsync(effectiveAppHostProjectFile.Directory!, configuredChannel, discoveryScope, source, cancellationToken));
                 packagesWithChannels = discoveredPackages as List<(NuGetPackage Package, PackageChannel Channel)> ?? discoveredPackages.ToList();
                 var packageCount = packagesWithChannels.Count;
                 searchPackagesActivity.SetAddPackageSearchResultCount(packageCount);
@@ -224,7 +224,8 @@ internal sealed class AddCommand : BaseCommand
                         integrationName,
                         configuredChannel,
                         GetExactPackageIdDiscoveryScope(discoveryScope, integrationName),
-                        cancellationToken))
+                        cancellationToken,
+                        source))
                     .Select(IntegrationPackageSearchService.GenerateFriendlyName)
                 ];
 
@@ -240,7 +241,8 @@ internal sealed class AddCommand : BaseCommand
                         effectiveAppHostProjectFile.Directory!,
                         builtInPackageIdCandidate,
                         configuredChannel,
-                        cancellationToken))
+                        cancellationToken,
+                        source))
                     .Select(IntegrationPackageSearchService.GenerateFriendlyName)
                     .ToArray();
 
@@ -444,12 +446,12 @@ internal sealed class AddCommand : BaseCommand
         var installedPackageIds = await GetInstalledPackageIdsAsync(appHostProjectFile, project, cancellationToken);
         if (installedPackageIds.Count == 0)
         {
-            return packages.OrderBy(package => package.FriendlyName, new CommunityToolkitFirstComparer());
+            return packages.OrderBy(package => package.FriendlyName, StringComparer.OrdinalIgnoreCase);
         }
 
         return packages
             .Where(package => !installedPackageIds.Contains(package.Package.Id))
-            .OrderBy(package => package.FriendlyName, new CommunityToolkitFirstComparer());
+            .OrderBy(package => package.FriendlyName, StringComparer.OrdinalIgnoreCase);
     }
 
     private async Task<HashSet<string>> GetInstalledPackageIdsAsync(FileInfo appHostProjectFile, IAppHostProject project, CancellationToken cancellationToken)
@@ -920,25 +922,5 @@ internal class AddCommandPrompter(IInteractionService interactionService) : IAdd
             : value;
 
         return formattedValue.PadRight(width);
-    }
-}
-
-internal sealed class CommunityToolkitFirstComparer : IComparer<string>
-{
-    public int Compare(string? x, string? y)
-    {
-        ArgumentNullException.ThrowIfNull(x);
-        ArgumentNullException.ThrowIfNull(y);
-
-        var prefix = "communitytoolkit-";
-        var xStarts = x.StartsWith(prefix, StringComparison.OrdinalIgnoreCase);
-        var yStarts = y.StartsWith(prefix, StringComparison.OrdinalIgnoreCase);
-
-        return (xStarts, yStarts) switch
-        {
-            (true, false) => 1,
-            (false, true) => -1,
-            _ => string.Compare(x, y, StringComparison.OrdinalIgnoreCase)
-        };
     }
 }
