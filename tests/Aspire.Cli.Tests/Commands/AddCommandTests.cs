@@ -3583,7 +3583,6 @@ public class AddCommandTests(ITestOutputHelper outputHelper)
         // Create two different channels
         var fakeCache = new FakeNuGetPackageCache();
         var implicitChannel = PackageChannel.CreateImplicitChannel(fakeCache, new TestFeatures());
-        
         var mappings = new[] { new PackageMapping("Aspire*", "https://preview-feed") };
         var explicitChannel = PackageChannel.CreateExplicitChannel("preview", PackageChannelQuality.Prerelease, mappings, fakeCache, new TestFeatures());
 
@@ -3610,9 +3609,9 @@ public class AddCommandTests(ITestOutputHelper outputHelper)
     {
         // Arrange
         using var workspace = TemporaryWorkspace.Create(outputHelper);
-        
+
         var selectedPackageId = string.Empty;
-        
+
         var services = CliTestHelper.CreateServiceCollection(workspace, outputHelper, options =>
         {
             options.ProjectLocatorFactory = _ => new TestProjectLocator();
@@ -3649,7 +3648,7 @@ public class AddCommandTests(ITestOutputHelper outputHelper)
                 return runner;
             };
         });
-        
+
         using var provider = services.BuildServiceProvider();
 
         // Act - without hives, should automatically select from implicit channel without prompting
