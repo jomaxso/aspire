@@ -1,40 +1,20 @@
 // Licensed to the .NET Foundation under one or more agreements.
 // The .NET Foundation licenses this file to you under the MIT license.
 
-using Aspire.Cli.Configuration;
+using Microsoft.AspNetCore.InternalTesting;
 using Aspire.Cli.NuGet;
 using Aspire.Cli.Packaging;
+using Aspire.Cli.Tests.TestServices;
 using Aspire.Cli.Tests.Utils;
+using Aspire.Cli.Utils;
 using Microsoft.Extensions.Configuration;
+using Microsoft.Extensions.Logging.Abstractions;
 using System.Xml.Linq;
 
 namespace Aspire.Cli.Tests.Packaging;
 
 public class PackagingServiceTests(ITestOutputHelper outputHelper)
 {
-
-    private sealed class FakeNuGetPackageCache : INuGetPackageCache
-    {
-        public Task<IEnumerable<Aspire.Shared.NuGetPackageCli>> GetTemplatePackagesAsync(DirectoryInfo workingDirectory, bool prerelease, FileInfo? nugetConfigFile, CancellationToken cancellationToken) => Task.FromResult<IEnumerable<Aspire.Shared.NuGetPackageCli>>([]);
-        public Task<IEnumerable<Aspire.Shared.NuGetPackageCli>> GetIntegrationPackagesAsync(DirectoryInfo workingDirectory, bool prerelease, FileInfo? nugetConfigFile, CancellationToken cancellationToken) => Task.FromResult<IEnumerable<Aspire.Shared.NuGetPackageCli>>([]);
-        public Task<IEnumerable<Aspire.Shared.NuGetPackageCli>> GetCliPackagesAsync(DirectoryInfo workingDirectory, bool prerelease, FileInfo? nugetConfigFile, CancellationToken cancellationToken) => Task.FromResult<IEnumerable<Aspire.Shared.NuGetPackageCli>>([]);
-        public Task<IEnumerable<Aspire.Shared.NuGetPackageCli>> GetPackagesAsync(DirectoryInfo workingDirectory, string packageId, Func<string, bool>? filter, bool prerelease, FileInfo? nugetConfigFile, bool useCache, CancellationToken cancellationToken) => Task.FromResult<IEnumerable<Aspire.Shared.NuGetPackageCli>>([]);
-    }
-
-    private sealed class TestFeatures : IFeatures
-    {
-        private readonly Dictionary<string, bool> _features = new();
-
-        public bool IsFeatureEnabled(string featureFlag, bool defaultValue)
-        {
-            return _features.TryGetValue(featureFlag, out var value) ? value : defaultValue;
-        }
-
-        public void SetFeature(string featureFlag, bool enabled)
-        {
-            _features[featureFlag] = enabled;
-        }
-    }
 
     [Fact]
     public async Task GetChannelsAsync_WhenStagingChannelDisabled_DoesNotIncludeStagingChannel()
@@ -43,15 +23,14 @@ public class PackagingServiceTests(ITestOutputHelper outputHelper)
         using var workspace = TemporaryWorkspace.Create(outputHelper);
         var tempDir = workspace.WorkspaceRoot;
         var hivesDir = new DirectoryInfo(Path.Combine(tempDir.FullName, ".aspire", "hives"));
-        var cacheDir = new DirectoryInfo(Path.Combine(tempDir.FullName, ".aspire", "cache"));
-        var executionContext = new CliExecutionContext(tempDir, hivesDir, cacheDir, new DirectoryInfo(Path.Combine(Path.GetTempPath(), "aspire-test-runtimes")));
+        var executionContext = TestExecutionContextHelper.CreateExecutionContext(tempDir, hivesDirectory: hivesDir);
         
         var features = new TestFeatures();
         var configuration = new ConfigurationBuilder().Build();
-        var packagingService = new PackagingService(executionContext, new FakeNuGetPackageCache(), features, configuration);
+        var packagingService = new PackagingService(executionContext, new FakeNuGetPackageCache(), features, configuration, NullLogger<PackagingService>.Instance);
 
         // Act
-        var channels = await packagingService.GetChannelsAsync();
+        var channels = await packagingService.GetChannelsAsync().DefaultTimeout();
 
         // Assert
         var channelNames = channels.Select(c => c.Name).ToList();
@@ -72,18 +51,127 @@ public class PackagingServiceTests(ITestOutputHelper outputHelper)
     }
 
     [Fact]
+    public async Task GetChannelsAsync_WhenIdentityChannelIsStaging_IncludesStagingChannel()
+    {
+        using var workspace = TemporaryWorkspace.Create(outputHelper);
+        var tempDir = workspace.WorkspaceRoot;
+        var hivesDir = new DirectoryInfo(Path.Combine(tempDir.FullName, ".aspire", "hives"));
+        var cacheDir = new DirectoryInfo(Path.Combine(tempDir.FullName, ".aspire", "cache"));
+        var executionContext = new CliExecutionContext(tempDir, hivesDir, cacheDir, new DirectoryInfo(Path.Combine(Path.GetTempPath(), "aspire-test-runtimes")), new DirectoryInfo(Path.Combine(Path.GetTempPath(), "aspire-test-logs")), "test.log", identityChannel: PackageChannelNames.Staging);
+
+        var configuration = new ConfigurationBuilder()
+            .AddInMemoryCollection(new Dictionary<string, string?>
+            {
+                ["overrideStagingFeed"] = "https://example.com/nuget/v3/index.json"
+            })
+            .Build();
+        var packagingService = new PackagingService(executionContext, new FakeNuGetPackageCache(), new TestFeatures(), configuration, NullLogger<PackagingService>.Instance);
+
+        var channels = await packagingService.GetChannelsAsync().DefaultTimeout();
+
+        var channelNames = channels.Select(c => c.Name).ToList();
+        Assert.Contains(PackageChannelNames.Staging, channelNames);
+        Assert.Equal(
+            channelNames.IndexOf(PackageChannelNames.Stable),
+            channelNames.IndexOf(PackageChannelNames.Staging) - 1);
+        Assert.Equal(
+            channelNames.IndexOf(PackageChannelNames.Daily),
+            channelNames.IndexOf(PackageChannelNames.Staging) + 1);
+
+        var stagingChannel = channels.First(c => c.Name == PackageChannelNames.Staging);
+        Assert.Equal(PackageChannelQuality.Both, stagingChannel.Quality);
+    }
+
+    [Fact]
+    public async Task GetChannelsAsync_WhenRequestedChannelIsStaging_IncludesStagingChannel()
+    {
+        using var workspace = TemporaryWorkspace.Create(outputHelper);
+        var tempDir = workspace.WorkspaceRoot;
+        var hivesDir = new DirectoryInfo(Path.Combine(tempDir.FullName, ".aspire", "hives"));
+        var cacheDir = new DirectoryInfo(Path.Combine(tempDir.FullName, ".aspire", "cache"));
+        var executionContext = new CliExecutionContext(tempDir, hivesDir, cacheDir, new DirectoryInfo(Path.Combine(Path.GetTempPath(), "aspire-test-runtimes")), new DirectoryInfo(Path.Combine(Path.GetTempPath(), "aspire-test-logs")), "test.log", identityChannel: PackageChannelNames.Stable);
+
+        var packagingService = new PackagingService(executionContext, new FakeNuGetPackageCache(), new TestFeatures(), new ConfigurationBuilder().Build(), NullLogger<PackagingService>.Instance);
+
+        var channels = await packagingService.GetChannelsAsync(requestedChannelName: PackageChannelNames.Staging).DefaultTimeout();
+
+        var stagingChannel = Assert.Single(channels, c => c.Name == PackageChannelNames.Staging);
+        Assert.Equal(PackageChannelQuality.Both, stagingChannel.Quality);
+    }
+
+    [Fact]
+    public async Task GetChannelsAsync_WhenConfigurationChannelIsStagingWithoutQualityOverride_DefaultsToBothAndSharedFeed()
+    {
+        using var workspace = TemporaryWorkspace.Create(outputHelper);
+        var tempDir = workspace.WorkspaceRoot;
+        var hivesDir = new DirectoryInfo(Path.Combine(tempDir.FullName, ".aspire", "hives"));
+        var cacheDir = new DirectoryInfo(Path.Combine(tempDir.FullName, ".aspire", "cache"));
+        var executionContext = new CliExecutionContext(tempDir, hivesDir, cacheDir, new DirectoryInfo(Path.Combine(Path.GetTempPath(), "aspire-test-runtimes")), new DirectoryInfo(Path.Combine(Path.GetTempPath(), "aspire-test-logs")), "test.log");
+
+        var configuration = new ConfigurationBuilder()
+            .AddInMemoryCollection(new Dictionary<string, string?>
+            {
+                ["channel"] = PackageChannelNames.Staging
+            })
+            .Build();
+        var packagingService = new PackagingService(executionContext, new FakeNuGetPackageCache(), new TestFeatures(), configuration, NullLogger<PackagingService>.Instance);
+
+        var channels = await packagingService.GetChannelsAsync().DefaultTimeout();
+
+        var stagingChannel = channels.First(c => c.Name == PackageChannelNames.Staging);
+        Assert.Equal(PackageChannelQuality.Both, stagingChannel.Quality);
+        Assert.False(stagingChannel.ConfigureGlobalPackagesFolder);
+        Assert.Contains(stagingChannel.Mappings!, m =>
+            m.PackageFilter == "Aspire*" &&
+            m.Source == "https://pkgs.dev.azure.com/dnceng/public/_packaging/dotnet9/nuget/v3/index.json");
+    }
+
+    /// <summary>
+    /// Locks in the structural invariant that <c>aspire init</c> and <c>aspire new</c> depend
+    /// on: the <c>stable</c> channel is always <see cref="PackageChannelType.Explicit"/> with a
+    /// non-empty <see cref="PackageChannel.Mappings"/> array containing a <see cref="PackageMapping.AllPackages"/>
+    /// pattern. <c>TemplateNuGetConfigService.CreateOrUpdateNuGetConfigWithoutPromptAsync</c>
+    /// short-circuits if the matching channel is not explicit or has no mappings, so a future
+    /// refactor that flipped stable to implicit / removed its mappings would silently turn the
+    /// workspace-NuGet.config write into a no-op for every stable-channel CLI user. The
+    /// InitCommand-level tests use a fake stable channel and cannot catch this regression at the
+    /// real <see cref="PackagingService"/> layer.
+    /// </summary>
+    [Fact]
+    public async Task GetChannelsAsync_StableChannel_IsExplicitWithAllPackagesMappingToNuGetOrg()
+    {
+        using var workspace = TemporaryWorkspace.Create(outputHelper);
+        var tempDir = workspace.WorkspaceRoot;
+        var hivesDir = new DirectoryInfo(Path.Combine(tempDir.FullName, ".aspire", "hives"));
+        var executionContext = TestExecutionContextHelper.CreateExecutionContext(tempDir, hivesDirectory: hivesDir);
+
+        var features = new TestFeatures();
+        var configuration = new ConfigurationBuilder().Build();
+        var packagingService = new PackagingService(executionContext, new FakeNuGetPackageCache(), features, configuration, NullLogger<PackagingService>.Instance);
+
+        var channels = await packagingService.GetChannelsAsync().DefaultTimeout();
+
+        var stableChannel = channels.First(c => c.Name == PackageChannelNames.Stable);
+        Assert.Equal(PackageChannelType.Explicit, stableChannel.Type);
+        Assert.NotNull(stableChannel.Mappings);
+        Assert.NotEmpty(stableChannel.Mappings!);
+        Assert.Contains(stableChannel.Mappings!, m =>
+            m.PackageFilter == PackageMapping.AllPackages &&
+            m.Source == "https://api.nuget.org/v3/index.json");
+    }
+
+    [Fact]
     public async Task GetChannelsAsync_WhenStagingChannelEnabled_IncludesStagingChannelWithOverrideFeed()
     {
         // Arrange
         using var workspace = TemporaryWorkspace.Create(outputHelper);
         var tempDir = workspace.WorkspaceRoot;
         var hivesDir = new DirectoryInfo(Path.Combine(tempDir.FullName, ".aspire", "hives"));
-        var cacheDir = new DirectoryInfo(Path.Combine(tempDir.FullName, ".aspire", "cache"));
-        var executionContext = new CliExecutionContext(tempDir, hivesDir, cacheDir, new DirectoryInfo(Path.Combine(Path.GetTempPath(), "aspire-test-runtimes")));
-        
+        var executionContext = TestExecutionContextHelper.CreateExecutionContext(tempDir, hivesDirectory: hivesDir);
+
         var features = new TestFeatures();
         features.SetFeature(KnownFeatures.StagingChannelEnabled, true);
-        
+
         var testFeedUrl = "https://example.com/nuget/v3/index.json";
         var configuration = new ConfigurationBuilder()
             .AddInMemoryCollection(new Dictionary<string, string?>
@@ -92,10 +180,10 @@ public class PackagingServiceTests(ITestOutputHelper outputHelper)
             })
             .Build();
 
-        var packagingService = new PackagingService(executionContext, new FakeNuGetPackageCache(), features, configuration);
+        var packagingService = new PackagingService(executionContext, new FakeNuGetPackageCache(), features, configuration, NullLogger<PackagingService>.Instance);
 
         // Act
-        var channels = await packagingService.GetChannelsAsync();
+        var channels = await packagingService.GetChannelsAsync().DefaultTimeout();
 
         // Assert
         var channelNames = channels.Select(c => c.Name).ToList();
@@ -122,8 +210,7 @@ public class PackagingServiceTests(ITestOutputHelper outputHelper)
         using var workspace = TemporaryWorkspace.Create(outputHelper);
         var tempDir = workspace.WorkspaceRoot;
         var hivesDir = new DirectoryInfo(Path.Combine(tempDir.FullName, ".aspire", "hives"));
-        var cacheDir = new DirectoryInfo(Path.Combine(tempDir.FullName, ".aspire", "cache"));
-        var executionContext = new CliExecutionContext(tempDir, hivesDir, cacheDir, new DirectoryInfo(Path.Combine(Path.GetTempPath(), "aspire-test-runtimes")));
+        var executionContext = TestExecutionContextHelper.CreateExecutionContext(tempDir, hivesDirectory: hivesDir);
         
         var features = new TestFeatures();
         features.SetFeature(KnownFeatures.StagingChannelEnabled, true);
@@ -136,10 +223,10 @@ public class PackagingServiceTests(ITestOutputHelper outputHelper)
             })
             .Build();
 
-        var packagingService = new PackagingService(executionContext, new FakeNuGetPackageCache(), features, configuration);
+        var packagingService = new PackagingService(executionContext, new FakeNuGetPackageCache(), features, configuration, NullLogger<PackagingService>.Instance);
 
         // Act
-        var channels = await packagingService.GetChannelsAsync();
+        var channels = await packagingService.GetChannelsAsync().DefaultTimeout();
 
         // Assert
         var stagingChannel = channels.First(c => c.Name == "staging");
@@ -155,13 +242,12 @@ public class PackagingServiceTests(ITestOutputHelper outputHelper)
         using var workspace = TemporaryWorkspace.Create(outputHelper);
         var tempDir = workspace.WorkspaceRoot;
         var hivesDir = new DirectoryInfo(Path.Combine(tempDir.FullName, ".aspire", "hives"));
-        var cacheDir = new DirectoryInfo(Path.Combine(tempDir.FullName, ".aspire", "cache"));
-        var executionContext = new CliExecutionContext(tempDir, hivesDir, cacheDir, new DirectoryInfo(Path.Combine(Path.GetTempPath(), "aspire-test-runtimes")));
+        var executionContext = TestExecutionContextHelper.CreateExecutionContext(tempDir, hivesDirectory: hivesDir);
         
         var features = new TestFeatures();
         features.SetFeature(KnownFeatures.StagingChannelEnabled, true);
         
-        var azureDevOpsFeedUrl = "https://pkgs.dev.azure.com/dnceng/public/_packaging/darc-pub-dotnet-aspire-abcd1234/nuget/v3/index.json";
+        var azureDevOpsFeedUrl = "https://pkgs.dev.azure.com/dnceng/public/_packaging/darc-pub-microsoft-aspire-abcd1234/nuget/v3/index.json";
         var configuration = new ConfigurationBuilder()
             .AddInMemoryCollection(new Dictionary<string, string?>
             {
@@ -169,10 +255,10 @@ public class PackagingServiceTests(ITestOutputHelper outputHelper)
             })
             .Build();
 
-        var packagingService = new PackagingService(executionContext, new FakeNuGetPackageCache(), features, configuration);
+        var packagingService = new PackagingService(executionContext, new FakeNuGetPackageCache(), features, configuration, NullLogger<PackagingService>.Instance);
 
         // Act
-        var channels = await packagingService.GetChannelsAsync();
+        var channels = await packagingService.GetChannelsAsync().DefaultTimeout();
 
         // Assert
         var stagingChannel = channels.First(c => c.Name == "staging");
@@ -188,8 +274,7 @@ public class PackagingServiceTests(ITestOutputHelper outputHelper)
         using var workspace = TemporaryWorkspace.Create(outputHelper);
         var tempDir = workspace.WorkspaceRoot;
         var hivesDir = new DirectoryInfo(Path.Combine(tempDir.FullName, ".aspire", "hives"));
-        var cacheDir = new DirectoryInfo(Path.Combine(tempDir.FullName, ".aspire", "cache"));
-        var executionContext = new CliExecutionContext(tempDir, hivesDir, cacheDir, new DirectoryInfo(Path.Combine(Path.GetTempPath(), "aspire-test-runtimes")));
+        var executionContext = TestExecutionContextHelper.CreateExecutionContext(tempDir, hivesDirectory: hivesDir);
         
         var features = new TestFeatures();
         features.SetFeature(KnownFeatures.StagingChannelEnabled, true);
@@ -202,10 +287,10 @@ public class PackagingServiceTests(ITestOutputHelper outputHelper)
             })
             .Build();
 
-        var packagingService = new PackagingService(executionContext, new FakeNuGetPackageCache(), features, configuration);
+        var packagingService = new PackagingService(executionContext, new FakeNuGetPackageCache(), features, configuration, NullLogger<PackagingService>.Instance);
 
         // Act
-        var channels = await packagingService.GetChannelsAsync();
+        var channels = await packagingService.GetChannelsAsync().DefaultTimeout();
 
         // Assert
         // When invalid URL is provided, staging channel should not be created (falls back to default behavior which returns null)
@@ -220,8 +305,7 @@ public class PackagingServiceTests(ITestOutputHelper outputHelper)
         using var workspace = TemporaryWorkspace.Create(outputHelper);
         var tempDir = workspace.WorkspaceRoot;
         var hivesDir = new DirectoryInfo(Path.Combine(tempDir.FullName, ".aspire", "hives"));
-        var cacheDir = new DirectoryInfo(Path.Combine(tempDir.FullName, ".aspire", "cache"));
-        var executionContext = new CliExecutionContext(tempDir, hivesDir, cacheDir, new DirectoryInfo(Path.Combine(Path.GetTempPath(), "aspire-test-runtimes")));
+        var executionContext = TestExecutionContextHelper.CreateExecutionContext(tempDir, hivesDirectory: hivesDir);
         
         var features = new TestFeatures();
         features.SetFeature(KnownFeatures.StagingChannelEnabled, true);
@@ -234,10 +318,10 @@ public class PackagingServiceTests(ITestOutputHelper outputHelper)
             })
             .Build();
 
-        var packagingService = new PackagingService(executionContext, new FakeNuGetPackageCache(), features, configuration);
+        var packagingService = new PackagingService(executionContext, new FakeNuGetPackageCache(), features, configuration, NullLogger<PackagingService>.Instance);
 
         // Act
-        var channels = await packagingService.GetChannelsAsync();
+        var channels = await packagingService.GetChannelsAsync().DefaultTimeout();
 
         // Assert
         var stagingChannel = channels.First(c => c.Name == "staging");
@@ -251,8 +335,7 @@ public class PackagingServiceTests(ITestOutputHelper outputHelper)
         using var workspace = TemporaryWorkspace.Create(outputHelper);
         var tempDir = workspace.WorkspaceRoot;
         var hivesDir = new DirectoryInfo(Path.Combine(tempDir.FullName, ".aspire", "hives"));
-        var cacheDir = new DirectoryInfo(Path.Combine(tempDir.FullName, ".aspire", "cache"));
-        var executionContext = new CliExecutionContext(tempDir, hivesDir, cacheDir, new DirectoryInfo(Path.Combine(Path.GetTempPath(), "aspire-test-runtimes")));
+        var executionContext = TestExecutionContextHelper.CreateExecutionContext(tempDir, hivesDirectory: hivesDir);
         
         var features = new TestFeatures();
         features.SetFeature(KnownFeatures.StagingChannelEnabled, true);
@@ -265,10 +348,10 @@ public class PackagingServiceTests(ITestOutputHelper outputHelper)
             })
             .Build();
 
-        var packagingService = new PackagingService(executionContext, new FakeNuGetPackageCache(), features, configuration);
+        var packagingService = new PackagingService(executionContext, new FakeNuGetPackageCache(), features, configuration, NullLogger<PackagingService>.Instance);
 
         // Act
-        var channels = await packagingService.GetChannelsAsync();
+        var channels = await packagingService.GetChannelsAsync().DefaultTimeout();
 
         // Assert
         var stagingChannel = channels.First(c => c.Name == "staging");
@@ -282,8 +365,7 @@ public class PackagingServiceTests(ITestOutputHelper outputHelper)
         using var workspace = TemporaryWorkspace.Create(outputHelper);
         var tempDir = workspace.WorkspaceRoot;
         var hivesDir = new DirectoryInfo(Path.Combine(tempDir.FullName, ".aspire", "hives"));
-        var cacheDir = new DirectoryInfo(Path.Combine(tempDir.FullName, ".aspire", "cache"));
-        var executionContext = new CliExecutionContext(tempDir, hivesDir, cacheDir, new DirectoryInfo(Path.Combine(Path.GetTempPath(), "aspire-test-runtimes")));
+        var executionContext = TestExecutionContextHelper.CreateExecutionContext(tempDir, hivesDirectory: hivesDir);
         
         var features = new TestFeatures();
         features.SetFeature(KnownFeatures.StagingChannelEnabled, true);
@@ -296,10 +378,10 @@ public class PackagingServiceTests(ITestOutputHelper outputHelper)
             })
             .Build();
 
-        var packagingService = new PackagingService(executionContext, new FakeNuGetPackageCache(), features, configuration);
+        var packagingService = new PackagingService(executionContext, new FakeNuGetPackageCache(), features, configuration, NullLogger<PackagingService>.Instance);
 
         // Act
-        var channels = await packagingService.GetChannelsAsync();
+        var channels = await packagingService.GetChannelsAsync().DefaultTimeout();
 
         // Assert
         var stagingChannel = channels.First(c => c.Name == "staging");
@@ -313,8 +395,7 @@ public class PackagingServiceTests(ITestOutputHelper outputHelper)
         using var workspace = TemporaryWorkspace.Create(outputHelper);
         var tempDir = workspace.WorkspaceRoot;
         var hivesDir = new DirectoryInfo(Path.Combine(tempDir.FullName, ".aspire", "hives"));
-        var cacheDir = new DirectoryInfo(Path.Combine(tempDir.FullName, ".aspire", "cache"));
-        var executionContext = new CliExecutionContext(tempDir, hivesDir, cacheDir, new DirectoryInfo(Path.Combine(Path.GetTempPath(), "aspire-test-runtimes")));
+        var executionContext = TestExecutionContextHelper.CreateExecutionContext(tempDir, hivesDirectory: hivesDir);
         
         var features = new TestFeatures();
         features.SetFeature(KnownFeatures.StagingChannelEnabled, true);
@@ -326,10 +407,10 @@ public class PackagingServiceTests(ITestOutputHelper outputHelper)
             })
             .Build();
 
-        var packagingService = new PackagingService(executionContext, new FakeNuGetPackageCache(), features, configuration);
+        var packagingService = new PackagingService(executionContext, new FakeNuGetPackageCache(), features, configuration, NullLogger<PackagingService>.Instance);
 
         // Act
-        var channels = await packagingService.GetChannelsAsync();
+        var channels = await packagingService.GetChannelsAsync().DefaultTimeout();
 
         // Assert
         var stagingChannel = channels.First(c => c.Name == "staging");
@@ -349,21 +430,22 @@ public class PackagingServiceTests(ITestOutputHelper outputHelper)
         var configuration = new ConfigurationBuilder()
             .AddInMemoryCollection(new Dictionary<string, string?>
             {
-                ["overrideStagingFeed"] = "https://pkgs.dev.azure.com/dnceng/public/_packaging/darc-pub-dotnet-aspire-48a11dae/nuget/v3/index.json"
+                ["overrideStagingFeed"] = "https://pkgs.dev.azure.com/dnceng/public/_packaging/darc-pub-microsoft-aspire-48a11dae/nuget/v3/index.json"
             })
             .Build();
 
         var packagingService = new PackagingService(
-            new CliExecutionContext(tempDir, tempDir, tempDir, new DirectoryInfo(Path.Combine(Path.GetTempPath(), "aspire-test-runtimes"))), 
-            new FakeNuGetPackageCache(), 
-            features, 
-            configuration);
+            TestExecutionContextHelper.CreateExecutionContext(tempDir),
+            new FakeNuGetPackageCache(),
+            features,
+            configuration,
+            NullLogger<PackagingService>.Instance);
 
-        var channels = await packagingService.GetChannelsAsync();
+        var channels = await packagingService.GetChannelsAsync().DefaultTimeout();
         var stagingChannel = channels.First(c => c.Name == "staging");
 
         // Act
-        await NuGetConfigMerger.CreateOrUpdateAsync(tempDir, stagingChannel);
+        await NuGetConfigMerger.CreateOrUpdateAsync(tempDir, stagingChannel).DefaultTimeout();
 
         // Assert
         var nugetConfigPath = Path.Combine(tempDir.FullName, "nuget.config");
@@ -381,7 +463,8 @@ public class PackagingServiceTests(ITestOutputHelper outputHelper)
         var globalPackagesFolderAdd = configSection.Elements("add")
             .FirstOrDefault(add => string.Equals((string?)add.Attribute("key"), "globalPackagesFolder", StringComparison.OrdinalIgnoreCase));
         Assert.NotNull(globalPackagesFolderAdd);
-        Assert.Equal(".nugetpackages", (string?)globalPackagesFolderAdd.Attribute("value"));
+        var actualGlobalPackagesFolder = (string?)globalPackagesFolderAdd.Attribute("value");
+        Assert.Equal(".nugetpackages", actualGlobalPackagesFolder);
     }
 
     [Fact]
@@ -391,14 +474,13 @@ public class PackagingServiceTests(ITestOutputHelper outputHelper)
         using var workspace = TemporaryWorkspace.Create(outputHelper);
         var tempDir = workspace.WorkspaceRoot;
         var hivesDir = new DirectoryInfo(Path.Combine(tempDir.FullName, ".aspire", "hives"));
-        var cacheDir = new DirectoryInfo(Path.Combine(tempDir.FullName, ".aspire", "cache"));
         
         // Create some PR hives to ensure staging appears before them
         hivesDir.Create();
         Directory.CreateDirectory(Path.Combine(hivesDir.FullName, "pr-10167"));
         Directory.CreateDirectory(Path.Combine(hivesDir.FullName, "pr-11832"));
         
-        var executionContext = new CliExecutionContext(tempDir, hivesDir, cacheDir, new DirectoryInfo(Path.Combine(Path.GetTempPath(), "aspire-test-runtimes")));
+        var executionContext = TestExecutionContextHelper.CreateExecutionContext(tempDir, hivesDirectory: hivesDir);
         
         var features = new TestFeatures();
         features.SetFeature(KnownFeatures.StagingChannelEnabled, true);
@@ -410,10 +492,10 @@ public class PackagingServiceTests(ITestOutputHelper outputHelper)
             })
             .Build();
 
-        var packagingService = new PackagingService(executionContext, new FakeNuGetPackageCache(), features, configuration);
+        var packagingService = new PackagingService(executionContext, new FakeNuGetPackageCache(), features, configuration, NullLogger<PackagingService>.Instance);
 
         // Act
-        var channels = await packagingService.GetChannelsAsync();
+        var channels = await packagingService.GetChannelsAsync().DefaultTimeout();
 
         // Assert
         var channelNames = channels.Select(c => c.Name).ToList();
@@ -448,22 +530,21 @@ public class PackagingServiceTests(ITestOutputHelper outputHelper)
         using var workspace = TemporaryWorkspace.Create(outputHelper);
         var tempDir = workspace.WorkspaceRoot;
         var hivesDir = new DirectoryInfo(Path.Combine(tempDir.FullName, ".aspire", "hives"));
-        var cacheDir = new DirectoryInfo(Path.Combine(tempDir.FullName, ".aspire", "cache"));
         
         // Create some PR hives
         hivesDir.Create();
         Directory.CreateDirectory(Path.Combine(hivesDir.FullName, "pr-12345"));
         
-        var executionContext = new CliExecutionContext(tempDir, hivesDir, cacheDir, new DirectoryInfo(Path.Combine(Path.GetTempPath(), "aspire-test-runtimes")));
+        var executionContext = TestExecutionContextHelper.CreateExecutionContext(tempDir, hivesDirectory: hivesDir);
         
         var features = new TestFeatures();
         // Staging disabled by default
         var configuration = new ConfigurationBuilder().Build();
 
-        var packagingService = new PackagingService(executionContext, new FakeNuGetPackageCache(), features, configuration);
+        var packagingService = new PackagingService(executionContext, new FakeNuGetPackageCache(), features, configuration, NullLogger<PackagingService>.Instance);
 
         // Act
-        var channels = await packagingService.GetChannelsAsync();
+        var channels = await packagingService.GetChannelsAsync().DefaultTimeout();
 
         // Assert
         var channelNames = channels.Select(c => c.Name).ToList();
@@ -480,5 +561,691 @@ public class PackagingServiceTests(ITestOutputHelper outputHelper)
         Assert.True(defaultIndex < stableIndex, "default should come before stable");
         Assert.True(stableIndex < dailyIndex, "stable should come before daily");
         Assert.True(dailyIndex < pr12345Index, "daily should come before pr-12345");
+    }
+
+    [Fact]
+    public async Task GetChannelsAsync_WhenStagingQualityPrerelease_AndNoFeedOverride_UsesSharedFeed()
+    {
+        // Arrange
+        using var workspace = TemporaryWorkspace.Create(outputHelper);
+        var tempDir = workspace.WorkspaceRoot;
+        var hivesDir = new DirectoryInfo(Path.Combine(tempDir.FullName, ".aspire", "hives"));
+        var executionContext = TestExecutionContextHelper.CreateExecutionContext(tempDir, hivesDirectory: hivesDir);
+        
+        var features = new TestFeatures();
+        features.SetFeature(KnownFeatures.StagingChannelEnabled, true);
+        
+        // Set quality to Prerelease but do NOT set overrideStagingFeed
+        var configuration = new ConfigurationBuilder()
+            .AddInMemoryCollection(new Dictionary<string, string?>
+            {
+                ["overrideStagingQuality"] = "Prerelease"
+            })
+            .Build();
+
+        var packagingService = new PackagingService(executionContext, new FakeNuGetPackageCache(), features, configuration, NullLogger<PackagingService>.Instance);
+
+        // Act
+        var channels = await packagingService.GetChannelsAsync().DefaultTimeout();
+
+        // Assert
+        var stagingChannel = channels.First(c => c.Name == "staging");
+        Assert.Equal(PackageChannelQuality.Prerelease, stagingChannel.Quality);
+        Assert.False(stagingChannel.ConfigureGlobalPackagesFolder);
+        
+        var aspireMapping = stagingChannel.Mappings!.FirstOrDefault(m => m.PackageFilter == "Aspire*");
+        Assert.NotNull(aspireMapping);
+        Assert.Equal("https://pkgs.dev.azure.com/dnceng/public/_packaging/dotnet9/nuget/v3/index.json", aspireMapping.Source);
+    }
+
+    [Fact]
+    public async Task GetChannelsAsync_WhenStagingQualityBoth_AndNoFeedOverride_UsesSharedFeed()
+    {
+        // Arrange
+        using var workspace = TemporaryWorkspace.Create(outputHelper);
+        var tempDir = workspace.WorkspaceRoot;
+        var hivesDir = new DirectoryInfo(Path.Combine(tempDir.FullName, ".aspire", "hives"));
+        var executionContext = TestExecutionContextHelper.CreateExecutionContext(tempDir, hivesDirectory: hivesDir);
+        
+        var features = new TestFeatures();
+        features.SetFeature(KnownFeatures.StagingChannelEnabled, true);
+        
+        // Set quality to Both but do NOT set overrideStagingFeed
+        var configuration = new ConfigurationBuilder()
+            .AddInMemoryCollection(new Dictionary<string, string?>
+            {
+                ["overrideStagingQuality"] = "Both"
+            })
+            .Build();
+
+        var packagingService = new PackagingService(executionContext, new FakeNuGetPackageCache(), features, configuration, NullLogger<PackagingService>.Instance);
+
+        // Act
+        var channels = await packagingService.GetChannelsAsync().DefaultTimeout();
+
+        // Assert
+        var stagingChannel = channels.First(c => c.Name == "staging");
+        Assert.Equal(PackageChannelQuality.Both, stagingChannel.Quality);
+        Assert.False(stagingChannel.ConfigureGlobalPackagesFolder);
+        
+        var aspireMapping = stagingChannel.Mappings!.FirstOrDefault(m => m.PackageFilter == "Aspire*");
+        Assert.NotNull(aspireMapping);
+        Assert.Equal("https://pkgs.dev.azure.com/dnceng/public/_packaging/dotnet9/nuget/v3/index.json", aspireMapping.Source);
+    }
+
+    [Fact]
+    public async Task GetChannelsAsync_WhenStagingQualityPrerelease_WithFeedOverride_UsesFeedOverride()
+    {
+        // Arrange
+        using var workspace = TemporaryWorkspace.Create(outputHelper);
+        var tempDir = workspace.WorkspaceRoot;
+        var hivesDir = new DirectoryInfo(Path.Combine(tempDir.FullName, ".aspire", "hives"));
+        var executionContext = TestExecutionContextHelper.CreateExecutionContext(tempDir, hivesDirectory: hivesDir);
+        
+        var features = new TestFeatures();
+        features.SetFeature(KnownFeatures.StagingChannelEnabled, true);
+        
+        // Set both quality override AND feed override — feed override should win
+        var customFeed = "https://custom-feed.example.com/v3/index.json";
+        var configuration = new ConfigurationBuilder()
+            .AddInMemoryCollection(new Dictionary<string, string?>
+            {
+                ["overrideStagingQuality"] = "Prerelease",
+                ["overrideStagingFeed"] = customFeed
+            })
+            .Build();
+
+        var packagingService = new PackagingService(executionContext, new FakeNuGetPackageCache(), features, configuration, NullLogger<PackagingService>.Instance);
+
+        // Act
+        var channels = await packagingService.GetChannelsAsync().DefaultTimeout();
+
+        // Assert
+        var stagingChannel = channels.First(c => c.Name == "staging");
+        Assert.Equal(PackageChannelQuality.Prerelease, stagingChannel.Quality);
+        // When an explicit feed override is provided, globalPackagesFolder stays enabled
+        Assert.True(stagingChannel.ConfigureGlobalPackagesFolder);
+        
+        var aspireMapping = stagingChannel.Mappings!.FirstOrDefault(m => m.PackageFilter == "Aspire*");
+        Assert.NotNull(aspireMapping);
+        Assert.Equal(customFeed, aspireMapping.Source);
+    }
+
+    [Fact]
+    public async Task NuGetConfigMerger_WhenStagingUsesSharedFeed_DoesNotAddGlobalPackagesFolder()
+    {
+        // Arrange
+        using var workspace = TemporaryWorkspace.Create(outputHelper);
+        var tempDir = workspace.WorkspaceRoot;
+        
+        var features = new TestFeatures();
+        features.SetFeature(KnownFeatures.StagingChannelEnabled, true);
+        
+        // Quality=Prerelease with no feed override → shared feed mode
+        var configuration = new ConfigurationBuilder()
+            .AddInMemoryCollection(new Dictionary<string, string?>
+            {
+                ["overrideStagingQuality"] = "Prerelease"
+            })
+            .Build();
+
+        var packagingService = new PackagingService(
+            TestExecutionContextHelper.CreateExecutionContext(tempDir),
+            new FakeNuGetPackageCache(),
+            features,
+            configuration,
+            NullLogger<PackagingService>.Instance);
+
+        var channels = await packagingService.GetChannelsAsync().DefaultTimeout();
+        var stagingChannel = channels.First(c => c.Name == "staging");
+
+        // Act
+        await NuGetConfigMerger.CreateOrUpdateAsync(tempDir, stagingChannel).DefaultTimeout();
+
+        // Assert
+        var nugetConfigPath = Path.Combine(tempDir.FullName, "nuget.config");
+        Assert.True(File.Exists(nugetConfigPath));
+        
+        var configContent = await File.ReadAllTextAsync(nugetConfigPath);
+        Assert.DoesNotContain("globalPackagesFolder", configContent);
+        Assert.DoesNotContain(".nugetpackages", configContent);
+        
+        // Verify it still has the shared feed URL
+        Assert.Contains("dotnet9", configContent);
+    }
+
+    [Fact]
+    public async Task GetChannelsAsync_WhenStagingPinToCliVersionSet_ChannelHasPinnedVersion()
+    {
+        // Arrange
+        using var workspace = TemporaryWorkspace.Create(outputHelper);
+        var tempDir = workspace.WorkspaceRoot;
+        var hivesDir = new DirectoryInfo(Path.Combine(tempDir.FullName, ".aspire", "hives"));
+        var executionContext = TestExecutionContextHelper.CreateExecutionContext(tempDir, hivesDirectory: hivesDir);
+        
+        var features = new TestFeatures();
+        features.SetFeature(KnownFeatures.StagingChannelEnabled, true);
+        
+        var configuration = new ConfigurationBuilder()
+            .AddInMemoryCollection(new Dictionary<string, string?>
+            {
+                ["overrideStagingQuality"] = "Prerelease",
+                ["stagingPinToCliVersion"] = "true"
+            })
+            .Build();
+
+        var packagingService = new PackagingService(executionContext, new FakeNuGetPackageCache(), features, configuration, NullLogger<PackagingService>.Instance);
+
+        // Act
+        var channels = await packagingService.GetChannelsAsync().DefaultTimeout();
+
+        // Assert
+        var stagingChannel = channels.First(c => c.Name == "staging");
+        Assert.NotNull(stagingChannel.PinnedVersion);
+        // Should not contain build metadata (+hash)
+        Assert.DoesNotContain("+", stagingChannel.PinnedVersion);
+    }
+
+    [Fact]
+    public async Task GetChannelsAsync_WhenStagingPinToCliVersionNotSet_ChannelHasNoPinnedVersion()
+    {
+        // Arrange
+        using var workspace = TemporaryWorkspace.Create(outputHelper);
+        var tempDir = workspace.WorkspaceRoot;
+        var hivesDir = new DirectoryInfo(Path.Combine(tempDir.FullName, ".aspire", "hives"));
+        var executionContext = TestExecutionContextHelper.CreateExecutionContext(tempDir, hivesDirectory: hivesDir);
+        
+        var features = new TestFeatures();
+        features.SetFeature(KnownFeatures.StagingChannelEnabled, true);
+        
+        var configuration = new ConfigurationBuilder()
+            .AddInMemoryCollection(new Dictionary<string, string?>
+            {
+                ["overrideStagingQuality"] = "Prerelease"
+                // No stagingPinToCliVersion
+            })
+            .Build();
+
+        var packagingService = new PackagingService(executionContext, new FakeNuGetPackageCache(), features, configuration, NullLogger<PackagingService>.Instance);
+
+        // Act
+        var channels = await packagingService.GetChannelsAsync().DefaultTimeout();
+
+        // Assert
+        var stagingChannel = channels.First(c => c.Name == "staging");
+        Assert.Null(stagingChannel.PinnedVersion);
+    }
+
+    [Fact]
+    public async Task GetChannelsAsync_WhenStagingPinToCliVersionSetButNotSharedFeed_ChannelHasNoPinnedVersion()
+    {
+        // Arrange - pin is set but explicit feed override means not using shared feed
+        using var workspace = TemporaryWorkspace.Create(outputHelper);
+        var tempDir = workspace.WorkspaceRoot;
+        var hivesDir = new DirectoryInfo(Path.Combine(tempDir.FullName, ".aspire", "hives"));
+        var executionContext = TestExecutionContextHelper.CreateExecutionContext(tempDir, hivesDirectory: hivesDir);
+        
+        var features = new TestFeatures();
+        features.SetFeature(KnownFeatures.StagingChannelEnabled, true);
+        
+        var configuration = new ConfigurationBuilder()
+            .AddInMemoryCollection(new Dictionary<string, string?>
+            {
+                ["overrideStagingFeed"] = "https://example.com/nuget/v3/index.json",
+                ["stagingPinToCliVersion"] = "true"
+            })
+            .Build();
+
+        var packagingService = new PackagingService(executionContext, new FakeNuGetPackageCache(), features, configuration, NullLogger<PackagingService>.Instance);
+
+        // Act
+        var channels = await packagingService.GetChannelsAsync().DefaultTimeout();
+
+        // Assert
+        var stagingChannel = channels.First(c => c.Name == "staging");
+        // With explicit feed override, useSharedFeed is false, so pinning is not activated
+        Assert.Null(stagingChannel.PinnedVersion);
+    }
+
+    [Fact]
+    public async Task GetChannelsAsync_WhenLocalHiveContainsProjectTemplatesPackage_ChannelHasPinnedVersion()
+    {
+        // Arrange
+        using var workspace = TemporaryWorkspace.Create(outputHelper);
+        var tempDir = workspace.WorkspaceRoot;
+        var hivesDir = new DirectoryInfo(Path.Combine(tempDir.FullName, ".aspire", "hives"));
+        var executionContext = TestExecutionContextHelper.CreateExecutionContext(tempDir, hivesDirectory: hivesDir);
+        var localPackagesDir = new DirectoryInfo(Path.Combine(hivesDir.FullName, "local", "packages"));
+        localPackagesDir.Create();
+
+        const string localVersion = "13.3.0-local.20260413.t002308";
+        File.WriteAllText(Path.Combine(localPackagesDir.FullName, $"Aspire.ProjectTemplates.{localVersion}.nupkg"), string.Empty);
+        File.WriteAllText(Path.Combine(localPackagesDir.FullName, $"Aspire.Hosting.{localVersion}.nupkg"), string.Empty);
+
+        var packagingService = new PackagingService(executionContext, new FakeNuGetPackageCache(), new TestFeatures(), new ConfigurationBuilder().Build(), NullLogger<PackagingService>.Instance);
+
+        // Act
+        var channels = await packagingService.GetChannelsAsync().DefaultTimeout();
+
+        // Assert
+        var localChannel = channels.First(c => c.Name == "local");
+        Assert.Equal(localVersion, localChannel.PinnedVersion);
+    }
+
+    [Fact]
+    public async Task LocalHiveChannel_WithPinnedVersion_ReturnsSyntheticTemplatePackage()
+    {
+        // Arrange - simulate package search returning a mismatched stable version
+        var fakeCache = new FakeNuGetPackageCacheWithPackages(
+        [
+            new() { Id = "Aspire.ProjectTemplates", Version = "13.2.2", Source = "https://api.nuget.org/v3/index.json" },
+        ]);
+
+        using var workspace = TemporaryWorkspace.Create(outputHelper);
+        var tempDir = workspace.WorkspaceRoot;
+        var hivesDir = new DirectoryInfo(Path.Combine(tempDir.FullName, ".aspire", "hives"));
+        var executionContext = TestExecutionContextHelper.CreateExecutionContext(tempDir, hivesDirectory: hivesDir);
+        var localPackagesDir = new DirectoryInfo(Path.Combine(hivesDir.FullName, "local", "packages"));
+        localPackagesDir.Create();
+
+        const string localVersion = "13.3.0-local.20260413.t002308";
+        File.WriteAllText(Path.Combine(localPackagesDir.FullName, $"Aspire.ProjectTemplates.{localVersion}.nupkg"), string.Empty);
+
+        var packagingService = new PackagingService(executionContext, fakeCache, new TestFeatures(), new ConfigurationBuilder().Build(), NullLogger<PackagingService>.Instance);
+
+        // Act
+        var channels = await packagingService.GetChannelsAsync().DefaultTimeout();
+        var localChannel = channels.First(c => c.Name == "local");
+        var templatePackages = await localChannel.GetTemplatePackagesAsync(tempDir, CancellationToken.None).DefaultTimeout();
+
+        // Assert
+        var package = Assert.Single(templatePackages);
+        Assert.Equal("Aspire.ProjectTemplates", package.Id);
+        Assert.Equal(localVersion, package.Version);
+        Assert.Equal(localPackagesDir.FullName.Replace('\\', '/'), package.Source);
+    }
+
+    /// <summary>
+    /// Verifies that when pinned to CLI version, GetTemplatePackagesAsync returns a synthetic result
+    /// with the pinned version, bypassing actual NuGet search.
+    /// </summary>
+    [Fact]
+    public async Task StagingChannel_WithPinnedVersion_ReturnsSyntheticTemplatePackage()
+    {
+        // Arrange - simulate a shared feed that has packages from both 13.2 and 13.3 version lines
+        var fakeCache = new FakeNuGetPackageCacheWithPackages(
+        [
+            new() { Id = "Aspire.ProjectTemplates", Version = "13.3.0-preview.1.26201.1", Source = "dotnet9" },
+            new() { Id = "Aspire.ProjectTemplates", Version = "13.3.0-preview.1.26200.5", Source = "dotnet9" },
+            new() { Id = "Aspire.ProjectTemplates", Version = "13.2.0-preview.1.26111.6", Source = "dotnet9" },
+            new() { Id = "Aspire.ProjectTemplates", Version = "13.2.0-preview.1.26110.3", Source = "dotnet9" },
+            new() { Id = "Aspire.ProjectTemplates", Version = "13.1.0", Source = "dotnet9" },
+        ]);
+
+        using var workspace = TemporaryWorkspace.Create(outputHelper);
+        var tempDir = workspace.WorkspaceRoot;
+        var hivesDir = new DirectoryInfo(Path.Combine(tempDir.FullName, ".aspire", "hives"));
+        var executionContext = TestExecutionContextHelper.CreateExecutionContext(tempDir, hivesDirectory: hivesDir);
+
+        var features = new TestFeatures();
+        features.SetFeature(KnownFeatures.StagingChannelEnabled, true);
+
+        var configuration = new ConfigurationBuilder()
+            .AddInMemoryCollection(new Dictionary<string, string?>
+            {
+                ["overrideStagingQuality"] = "Prerelease",
+                ["stagingPinToCliVersion"] = "true"
+            })
+            .Build();
+
+        var packagingService = new PackagingService(executionContext, fakeCache, features, configuration, NullLogger<PackagingService>.Instance);
+
+        // Act
+        var channels = await packagingService.GetChannelsAsync().DefaultTimeout();
+        var stagingChannel = channels.First(c => c.Name == "staging");
+        var templatePackages = await stagingChannel.GetTemplatePackagesAsync(tempDir, CancellationToken.None).DefaultTimeout();
+
+        // Assert - should return exactly one synthetic package with the CLI's pinned version
+        var packageList = templatePackages.ToList();
+        outputHelper.WriteLine($"Template packages returned: {packageList.Count}");
+        foreach (var p in packageList)
+        {
+            outputHelper.WriteLine($"  {p.Id} {p.Version}");
+        }
+
+        Assert.Single(packageList);
+        Assert.Equal("Aspire.ProjectTemplates", packageList[0].Id);
+        Assert.Equal(stagingChannel.PinnedVersion, packageList[0].Version);
+        // Pinned version should not contain build metadata
+        Assert.DoesNotContain("+", packageList[0].Version!);
+    }
+
+    /// <summary>
+    /// Verifies that when pinned to CLI version, GetIntegrationPackagesAsync discovers packages
+    /// from the feed but overrides their version to the pinned version.
+    /// </summary>
+    [Fact]
+    public async Task StagingChannel_WithPinnedVersion_OverridesIntegrationPackageVersions()
+    {
+        // Arrange - integration packages with various versions
+        var fakeCache = new FakeNuGetPackageCacheWithPackages(
+        [
+            new() { Id = "Aspire.Hosting.Redis", Version = "13.3.0-preview.1.26201.1", Source = "dotnet9" },
+            new() { Id = "Aspire.Hosting.PostgreSQL", Version = "13.3.0-preview.1.26201.1", Source = "dotnet9" },
+        ]);
+
+        using var workspace = TemporaryWorkspace.Create(outputHelper);
+        var tempDir = workspace.WorkspaceRoot;
+        var hivesDir = new DirectoryInfo(Path.Combine(tempDir.FullName, ".aspire", "hives"));
+        var executionContext = TestExecutionContextHelper.CreateExecutionContext(tempDir, hivesDirectory: hivesDir);
+
+        var features = new TestFeatures();
+        features.SetFeature(KnownFeatures.StagingChannelEnabled, true);
+
+        var configuration = new ConfigurationBuilder()
+            .AddInMemoryCollection(new Dictionary<string, string?>
+            {
+                ["overrideStagingQuality"] = "Prerelease",
+                ["stagingPinToCliVersion"] = "true"
+            })
+            .Build();
+
+        var packagingService = new PackagingService(executionContext, fakeCache, features, configuration, NullLogger<PackagingService>.Instance);
+
+        // Act
+        var channels = await packagingService.GetChannelsAsync().DefaultTimeout();
+        var stagingChannel = channels.First(c => c.Name == "staging");
+        var integrationPackages = await stagingChannel.GetIntegrationPackagesAsync(tempDir, CancellationToken.None).DefaultTimeout();
+
+        // Assert - should discover both packages but with pinned version
+        var packageList = integrationPackages.ToList();
+        outputHelper.WriteLine($"Integration packages returned: {packageList.Count}");
+        foreach (var p in packageList)
+        {
+            outputHelper.WriteLine($"  {p.Id} {p.Version}");
+        }
+
+        Assert.Equal(2, packageList.Count);
+        Assert.All(packageList, p => Assert.Equal(stagingChannel.PinnedVersion, p.Version));
+        Assert.Contains(packageList, p => p.Id == "Aspire.Hosting.Redis");
+        Assert.Contains(packageList, p => p.Id == "Aspire.Hosting.PostgreSQL");
+    }
+
+    /// <summary>
+    /// Verifies that without pinning, all prerelease packages from the feed are returned as-is.
+    /// </summary>
+    [Fact]
+    public async Task StagingChannel_WithoutPinnedVersion_ReturnsAllPrereleasePackages()
+    {
+        // Arrange
+        var fakeCache = new FakeNuGetPackageCacheWithPackages(
+        [
+            new() { Id = "Aspire.ProjectTemplates", Version = "13.3.0-preview.1.26201.1", Source = "dotnet9" },
+            new() { Id = "Aspire.ProjectTemplates", Version = "13.2.0-preview.1.26111.6", Source = "dotnet9" },
+            new() { Id = "Aspire.ProjectTemplates", Version = "13.1.0", Source = "dotnet9" },
+        ]);
+
+        using var workspace = TemporaryWorkspace.Create(outputHelper);
+        var tempDir = workspace.WorkspaceRoot;
+        var hivesDir = new DirectoryInfo(Path.Combine(tempDir.FullName, ".aspire", "hives"));
+        var executionContext = TestExecutionContextHelper.CreateExecutionContext(tempDir, hivesDirectory: hivesDir);
+
+        var features = new TestFeatures();
+        features.SetFeature(KnownFeatures.StagingChannelEnabled, true);
+
+        var configuration = new ConfigurationBuilder()
+            .AddInMemoryCollection(new Dictionary<string, string?>
+            {
+                ["overrideStagingQuality"] = "Prerelease"
+                // No stagingPinToCliVersion — should return all prerelease
+            })
+            .Build();
+
+        var packagingService = new PackagingService(executionContext, fakeCache, features, configuration, NullLogger<PackagingService>.Instance);
+
+        // Act
+        var channels = await packagingService.GetChannelsAsync().DefaultTimeout();
+        var stagingChannel = channels.First(c => c.Name == "staging");
+        var templatePackages = await stagingChannel.GetTemplatePackagesAsync(tempDir, CancellationToken.None).DefaultTimeout();
+
+        // Assert
+        var packageList = templatePackages.ToList();
+        outputHelper.WriteLine($"Template packages returned: {packageList.Count}");
+        foreach (var p in packageList)
+        {
+            outputHelper.WriteLine($"  {p.Id} {p.Version}");
+        }
+
+        // Should return only the prerelease ones (quality filter), but both 13.3 and 13.2
+        Assert.Equal(2, packageList.Count);
+        Assert.Contains(packageList, p => p.Version!.StartsWith("13.3"));
+        Assert.Contains(packageList, p => p.Version!.StartsWith("13.2"));
+    }
+
+    /// <summary>
+    /// Verifies that hive channel names always match their directory name regardless of
+    /// the CLI identity channel. PackagingService no longer renames hive directories
+    /// in-memory; the script writes the hive as "local" directly.
+    /// </summary>
+    [Fact]
+    public async Task GetChannelsAsync_HiveChannelNameAlwaysMatchesDirectoryName()
+    {
+        // Arrange
+        using var workspace = TemporaryWorkspace.Create(outputHelper);
+        var tempDir = workspace.WorkspaceRoot;
+        var hivesDir = new DirectoryInfo(Path.Combine(tempDir.FullName, ".aspire", "hives"));
+
+        // Hive directory named "local" (as written by get-aspire-cli-pr.sh --local-dir)
+        const string localHiveName = "local";
+        var localPackagesDir = new DirectoryInfo(Path.Combine(hivesDir.FullName, localHiveName, "packages"));
+        localPackagesDir.Create();
+
+        const string pinnedVersion = "13.4.0-pr.16820.g1a99aa46";
+        File.WriteAllText(Path.Combine(localPackagesDir.FullName, $"Aspire.ProjectTemplates.{pinnedVersion}.nupkg"), string.Empty);
+
+        // CLI binary built with AspireCliChannel=local
+        var executionContext = TestExecutionContextHelper.CreateExecutionContext(tempDir, hivesDirectory: hivesDir, identityChannel: "local");
+
+        var packagingService = new PackagingService(executionContext, new FakeNuGetPackageCache(), new TestFeatures(), new ConfigurationBuilder().Build(), NullLogger<PackagingService>.Instance);
+
+        // Act
+        var channels = await packagingService.GetChannelsAsync().DefaultTimeout();
+
+        // Assert: channel name == directory name (no in-memory rename)
+        var localChannel = channels.FirstOrDefault(c => c.Name == localHiveName);
+        Assert.NotNull(localChannel);
+        Assert.Equal(pinnedVersion, localChannel.PinnedVersion);
+    }
+
+    /// <summary>
+    /// Verifies that when the CLI identity channel is NOT "local" (e.g. "daily"),
+    /// hive channels keep their directory-derived names.
+    /// </summary>
+    [Fact]
+    public async Task GetChannelsAsync_WhenIdentityChannelIsNotLocal_HiveKeepsDirectoryName()
+    {
+        // Arrange
+        using var workspace = TemporaryWorkspace.Create(outputHelper);
+        var tempDir = workspace.WorkspaceRoot;
+        var hivesDir = new DirectoryInfo(Path.Combine(tempDir.FullName, ".aspire", "hives"));
+
+        const string runHiveName = "run-99999";
+        var runPackagesDir = new DirectoryInfo(Path.Combine(hivesDir.FullName, runHiveName, "packages"));
+        runPackagesDir.Create();
+
+        const string pinnedVersion = "13.4.0-pr.16820.g1a99aa46";
+        File.WriteAllText(Path.Combine(runPackagesDir.FullName, $"Aspire.ProjectTemplates.{pinnedVersion}.nupkg"), string.Empty);
+
+        // CLI binary built with non-local channel ("daily") — explicit so the test stays
+        // accurate even as the CliExecutionContext default channel evolves.
+        var executionContext = TestExecutionContextHelper.CreateExecutionContext(tempDir, hivesDirectory: hivesDir, identityChannel: "daily");
+
+        var packagingService = new PackagingService(executionContext, new FakeNuGetPackageCache(), new TestFeatures(), new ConfigurationBuilder().Build(), NullLogger<PackagingService>.Instance);
+
+        // Act
+        var channels = await packagingService.GetChannelsAsync().DefaultTimeout();
+
+        // Assert: the hive channel keeps its directory name
+        var hiveChannel = channels.FirstOrDefault(c => c.Name == runHiveName);
+        Assert.NotNull(hiveChannel);
+    }
+
+    /// <summary>
+    /// Verifies that for a local hive channel with a pinned version, GetIntegrationPackagesAsync
+    /// enumerates .nupkg files directly from the local folder and returns all Aspire.Hosting.*
+    /// packages without calling dotnet package search (which does not support local folder sources).
+    /// </summary>
+    [Fact]
+    public async Task LocalHiveChannel_WithPinnedVersion_ReturnsIntegrationPackagesFromNupkgFiles()
+    {
+        // Arrange
+        using var workspace = TemporaryWorkspace.Create(outputHelper);
+        var tempDir = workspace.WorkspaceRoot;
+        var hivesDir = new DirectoryInfo(Path.Combine(tempDir.FullName, ".aspire", "hives"));
+        var executionContext = TestExecutionContextHelper.CreateExecutionContext(tempDir, hivesDirectory: hivesDir);
+
+        var localPackagesDir = new DirectoryInfo(Path.Combine(hivesDir.FullName, "local", "packages"));
+        localPackagesDir.Create();
+
+        const string localVersion = "13.4.0-pr.16820.g1a99aa46";
+        // Hosting integration packages that should be returned
+        File.WriteAllText(Path.Combine(localPackagesDir.FullName, $"Aspire.Hosting.{localVersion}.nupkg"), string.Empty);
+        File.WriteAllText(Path.Combine(localPackagesDir.FullName, $"Aspire.Hosting.Redis.{localVersion}.nupkg"), string.Empty);
+        File.WriteAllText(Path.Combine(localPackagesDir.FullName, $"Aspire.Hosting.JavaScript.{localVersion}.nupkg"), string.Empty);
+        // Non-hosting packages that should NOT be returned by GetIntegrationPackagesAsync
+        File.WriteAllText(Path.Combine(localPackagesDir.FullName, $"Aspire.ProjectTemplates.{localVersion}.nupkg"), string.Empty);
+        File.WriteAllText(Path.Combine(localPackagesDir.FullName, $"Aspire.AppHost.Sdk.{localVersion}.nupkg"), string.Empty);
+
+        var packagingService = new PackagingService(executionContext, new FakeNuGetPackageCache(), new TestFeatures(), new ConfigurationBuilder().Build(), NullLogger<PackagingService>.Instance);
+
+        // Act
+        var channels = await packagingService.GetChannelsAsync().DefaultTimeout();
+        var localChannel = channels.First(c => c.Name == "local");
+        var integrationPackages = await localChannel.GetIntegrationPackagesAsync(tempDir, CancellationToken.None).DefaultTimeout();
+
+        // Assert
+        var packageList = integrationPackages.ToList();
+        Assert.Equal(3, packageList.Count);
+        Assert.All(packageList, p => Assert.Equal(localVersion, p.Version));
+        Assert.Contains(packageList, p => p.Id == "Aspire.Hosting");
+        Assert.Contains(packageList, p => p.Id == "Aspire.Hosting.Redis");
+        Assert.Contains(packageList, p => p.Id == "Aspire.Hosting.JavaScript");
+        // Non-hosting packages must not appear
+        Assert.DoesNotContain(packageList, p => p.Id == "Aspire.ProjectTemplates");
+        Assert.DoesNotContain(packageList, p => p.Id == "Aspire.AppHost.Sdk");
+    }
+
+    [Fact]
+    public async Task GetChannelsAsync_LocalHive_AspireMappingPointsAtLocalDirectory_NotPublicFeed()
+    {
+        using var workspace = TemporaryWorkspace.Create(outputHelper);
+        var tempDir = workspace.WorkspaceRoot;
+        var hivesDir = new DirectoryInfo(Path.Combine(tempDir.FullName, ".aspire", "hives"));
+        var executionContext = TestExecutionContextHelper.CreateExecutionContext(tempDir, hivesDirectory: hivesDir);
+
+        var localPackagesDir = new DirectoryInfo(Path.Combine(hivesDir.FullName, PackageChannelNames.Local, "packages"));
+        localPackagesDir.Create();
+        File.WriteAllText(Path.Combine(localPackagesDir.FullName, "Aspire.Hosting.13.4.0-pr.16820.g1a99aa46.nupkg"), string.Empty);
+
+        var packagingService = new PackagingService(executionContext, new FakeNuGetPackageCache(), new TestFeatures(), new ConfigurationBuilder().Build(), NullLogger<PackagingService>.Instance);
+
+        var channels = await packagingService.GetChannelsAsync().DefaultTimeout();
+        var localChannel = channels.First(c => c.Name == PackageChannelNames.Local);
+
+        Assert.NotNull(localChannel.Mappings);
+        var aspireMapping = localChannel.Mappings!.FirstOrDefault(m => m.PackageFilter == "Aspire*");
+        Assert.NotNull(aspireMapping);
+        var expectedLocalPath = localPackagesDir.FullName.Replace('\\', '/');
+        Assert.Equal(expectedLocalPath, aspireMapping.Source);
+        Assert.False(UrlHelper.IsHttpUrl(aspireMapping.Source), "Local hive Aspire* mapping must be a filesystem path, not an HTTP feed.");
+
+        var fallbackMapping = localChannel.Mappings!.FirstOrDefault(m => m.PackageFilter == PackageMapping.AllPackages);
+        Assert.NotNull(fallbackMapping);
+        Assert.Equal("https://api.nuget.org/v3/index.json", fallbackMapping.Source);
+    }
+
+    [Fact]
+    public async Task GetChannelsAsync_LocalHive_EmptyDirectory_ReturnsChannelWithNullPinnedVersion()
+    {
+        // Partial-state shape: the user has `~/.aspire/hives/local/` on disk but no
+        // packages have been deposited yet (e.g., a partially-completed local build, or an
+        // install script that created the layout but failed before staging packages).
+        // Pinning behavior:
+        //  - GetChannelsAsync still produces a `local` channel because GetDirectories() sees the dir.
+        //  - GetLocalHivePinnedVersion returns null (no Aspire.ProjectTemplates / Aspire.Hosting /
+        //    Aspire.AppHost.Sdk nupkgs to derive a version from), so the channel's PinnedVersion
+        //    is null. Downstream, PackageChannel.GetIntegrationPackagesAsync only takes the
+        //    direct-enumeration shortcut when PinnedVersion != null, so an empty local hive
+        //    falls through to the standard NuGet search path with the local dir as a source.
+        // This test pins the channel-construction half of that contract.
+        using var workspace = TemporaryWorkspace.Create(outputHelper);
+        var tempDir = workspace.WorkspaceRoot;
+        var hivesDir = new DirectoryInfo(Path.Combine(tempDir.FullName, ".aspire", "hives"));
+        var executionContext = TestExecutionContextHelper.CreateExecutionContext(tempDir, hivesDirectory: hivesDir);
+
+        // Create the hive root but no `packages/` subdir — directory-exists-but-unpopulated.
+        var localHiveDir = new DirectoryInfo(Path.Combine(hivesDir.FullName, PackageChannelNames.Local));
+        localHiveDir.Create();
+
+        var packagingService = new PackagingService(executionContext, new FakeNuGetPackageCache(), new TestFeatures(), new ConfigurationBuilder().Build(), NullLogger<PackagingService>.Instance);
+
+        var channels = await packagingService.GetChannelsAsync().DefaultTimeout();
+
+        var localChannel = channels.FirstOrDefault(c => c.Name == PackageChannelNames.Local);
+        Assert.NotNull(localChannel);
+        Assert.Null(localChannel.PinnedVersion);
+        Assert.NotNull(localChannel.Mappings);
+        var aspireMapping = localChannel.Mappings!.FirstOrDefault(m => m.PackageFilter == "Aspire*");
+        Assert.NotNull(aspireMapping);
+        // Mapping still points at the (non-existent) packages dir; PackageChannel guards on
+        // Directory.Exists before enumerating, so this is safe at downstream call time.
+        var expectedLocalPackagesPath = Path.Combine(localHiveDir.FullName, "packages").Replace('\\', '/');
+        Assert.Equal(expectedLocalPackagesPath, aspireMapping.Source);
+    }
+
+    [Fact]
+    public async Task GetChannelsAsync_LocalHive_EmptyPackagesDirectory_ReturnsChannelWithNullPinnedVersion()
+    {
+        // Partial-state variant: `~/.aspire/hives/local/packages/` exists but contains zero `*.nupkg` files.
+        // GetLocalHivePinnedVersion returns null because no FindHighestVersion lookup matches.
+        using var workspace = TemporaryWorkspace.Create(outputHelper);
+        var tempDir = workspace.WorkspaceRoot;
+        var hivesDir = new DirectoryInfo(Path.Combine(tempDir.FullName, ".aspire", "hives"));
+        var executionContext = TestExecutionContextHelper.CreateExecutionContext(tempDir, hivesDirectory: hivesDir);
+
+        var localPackagesDir = new DirectoryInfo(Path.Combine(hivesDir.FullName, PackageChannelNames.Local, "packages"));
+        localPackagesDir.Create();
+
+        var packagingService = new PackagingService(executionContext, new FakeNuGetPackageCache(), new TestFeatures(), new ConfigurationBuilder().Build(), NullLogger<PackagingService>.Instance);
+
+        var channels = await packagingService.GetChannelsAsync().DefaultTimeout();
+
+        var localChannel = channels.FirstOrDefault(c => c.Name == PackageChannelNames.Local);
+        Assert.NotNull(localChannel);
+        Assert.Null(localChannel.PinnedVersion);
+    }
+
+    private sealed class FakeNuGetPackageCacheWithPackages(List<Aspire.Shared.NuGetPackageCli> packages) : INuGetPackageCache
+    {
+        public Task<IEnumerable<Aspire.Shared.NuGetPackageCli>> GetTemplatePackagesAsync(DirectoryInfo workingDirectory, bool prerelease, FileInfo? nugetConfigFile, CancellationToken cancellationToken)
+        {
+            // Simulate what the real cache does: filter by prerelease flag
+            var filtered = prerelease
+                ? packages.Where(p => Semver.SemVersion.Parse(p.Version).IsPrerelease)
+                : packages.Where(p => !Semver.SemVersion.Parse(p.Version).IsPrerelease);
+            return Task.FromResult<IEnumerable<Aspire.Shared.NuGetPackageCli>>(filtered.ToList());
+        }
+
+        public Task<IEnumerable<Aspire.Shared.NuGetPackageCli>> GetIntegrationPackagesAsync(DirectoryInfo workingDirectory, bool prerelease, FileInfo? nugetConfigFile, CancellationToken cancellationToken)
+            => GetTemplatePackagesAsync(workingDirectory, prerelease, nugetConfigFile, cancellationToken);
+
+        public Task<IEnumerable<Aspire.Shared.NuGetPackageCli>> GetCliPackagesAsync(DirectoryInfo workingDirectory, bool prerelease, FileInfo? nugetConfigFile, CancellationToken cancellationToken)
+            => Task.FromResult<IEnumerable<Aspire.Shared.NuGetPackageCli>>([]);
+
+        public Task<IEnumerable<Aspire.Shared.NuGetPackageCli>> GetPackagesAsync(DirectoryInfo workingDirectory, string packageId, Func<string, bool>? filter, bool prerelease, FileInfo? nugetConfigFile, bool useCache, CancellationToken cancellationToken)
+            => GetTemplatePackagesAsync(workingDirectory, prerelease, nugetConfigFile, cancellationToken);
+
+        public Task<IEnumerable<Aspire.Shared.NuGetPackageCli>> GetPackageVersionsAsync(DirectoryInfo workingDirectory, string exactPackageId, bool prerelease, FileInfo? nugetConfigFile, bool useCache, CancellationToken cancellationToken)
+            => GetTemplatePackagesAsync(workingDirectory, prerelease, nugetConfigFile, cancellationToken);
     }
 }

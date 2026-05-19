@@ -4,6 +4,7 @@
 using Aspire.Hosting.ApplicationModel;
 using Aspire.Hosting.Dashboard;
 using Aspire.Hosting.Devcontainers.Codespaces;
+using Aspire.Hosting.Diagnostics;
 using Aspire.Hosting.Utils;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
@@ -12,105 +13,181 @@ using Microsoft.Extensions.Options;
 namespace Aspire.Hosting.Backchannel;
 
 /// <summary>
-/// Helper class for retrieving dashboard URLs with login tokens.
+/// Helper class for retrieving dashboard connection information.
 /// </summary>
 internal static class DashboardUrlsHelper
 {
+
     /// <summary>
-    /// Gets the dashboard URLs including the login token.
+    /// Gets all dashboard connection information in a single call.
     /// Waits for the dashboard to become healthy before returning.
     /// </summary>
     /// <param name="serviceProvider">The service provider.</param>
     /// <param name="logger">The logger for diagnostic output.</param>
     /// <param name="cancellationToken">A cancellation token.</param>
-    /// <returns>The Dashboard URLs state including health and login URLs.</returns>
+    /// <returns>Complete dashboard connection information.</returns>
+    public static async Task<DashboardConnectionInfo> GetDashboardConnectionInfoAsync(
+        IServiceProvider serviceProvider,
+        ILogger logger,
+        CancellationToken cancellationToken = default)
+    {
+        var profilingTelemetry = serviceProvider.GetRequiredService<ProfilingTelemetry>();
+        using var activity = profilingTelemetry.StartDashboardGetConnectionInfo();
+        var resourceNotificationService = serviceProvider.GetRequiredService<ResourceNotificationService>();
+
+        // Wait for the dashboard to be healthy
+        using (var waitActivity = profilingTelemetry.StartDashboardWaitHealthy())
+        {
+            try
+            {
+                await resourceNotificationService.WaitForResourceHealthyAsync(
+                    KnownResourceNames.AspireDashboard,
+                    WaitBehavior.StopOnResourceUnavailable,
+                    cancellationToken).ConfigureAwait(false);
+                waitActivity.SetDashboardHealthy(true);
+                waitActivity.AddDashboardWaitHealthyCompleted();
+            }
+            catch (DistributedApplicationException ex)
+            {
+                waitActivity.SetDashboardHealthy(false);
+                waitActivity.AddDashboardWaitHealthyFailed();
+                waitActivity.SetError(ex);
+                activity.SetDashboardHealthy(false);
+                logger.LogWarning(ex, "An error occurred while waiting for the Aspire Dashboard to become healthy.");
+                return DashboardConnectionInfo.Unhealthy;
+            }
+        }
+
+        try
+        {
+            var dashboardOptions = serviceProvider.GetService<IOptions<DashboardOptions>>()?.Value;
+            if (dashboardOptions is null)
+            {
+                activity.SetDashboardHealthy(false);
+                activity.SetDashboardUrlSource(ProfilingTelemetry.Values.DashboardUrlSourceNone);
+                logger.LogWarning("Dashboard options not found.");
+                return DashboardConnectionInfo.Unhealthy;
+            }
+
+            // Find the dashboard resource and get all endpoints
+            var appModel = serviceProvider.GetService<DistributedApplicationModel>();
+            var dashboardResource = appModel?.Resources.SingleOrDefault(
+                r => string.Equals(r.Name, KnownResourceNames.AspireDashboard, StringComparisons.ResourceName)) as IResourceWithEndpoints;
+
+            string? apiBaseUrl = null;
+            var apiBaseUrlSource = ProfilingTelemetry.Values.DashboardUrlSourceNone;
+
+            using (var resolveActivity = profilingTelemetry.StartDashboardResolveUrls())
+            {
+                if (dashboardResource is not null)
+                {
+                    // API endpoint (https or http) - used for Dashboard UI and Telemetry API
+                    var httpsEndpoint = dashboardResource.GetEndpoint("https");
+                    var httpEndpoint = dashboardResource.GetEndpoint("http");
+                    var apiEndpoint = httpsEndpoint.Exists ? httpsEndpoint : httpEndpoint;
+                    if (apiEndpoint.Exists)
+                    {
+                        apiBaseUrl = await EndpointHostHelpers.GetUrlWithTargetHostAsync(apiEndpoint, cancellationToken).ConfigureAwait(false);
+                        if (!string.IsNullOrEmpty(apiBaseUrl))
+                        {
+                            apiBaseUrlSource = ProfilingTelemetry.Values.DashboardUrlSourceResource;
+                        }
+                    }
+                }
+
+                // Fall back to configured URL if we couldn't get it from the resource
+                if (string.IsNullOrEmpty(apiBaseUrl))
+                {
+                    if (StringUtils.TryGetUriFromDelimitedString(dashboardOptions.DashboardUrl, ";", out var dashboardUri))
+                    {
+                        apiBaseUrl = dashboardUri.GetLeftPart(UriPartial.Authority);
+                        apiBaseUrlSource = ProfilingTelemetry.Values.DashboardUrlSourceConfiguration;
+                    }
+                }
+
+                resolveActivity.SetDashboardUrlSource(apiBaseUrlSource);
+                resolveActivity.SetDashboardHasApiBaseUrl(!string.IsNullOrEmpty(apiBaseUrl));
+            }
+
+            // Build dashboard URLs. When browser token auth is enabled, include the login token.
+            // When anonymous access is enabled, return the base URL directly.
+            var codespacesUrlRewriter = serviceProvider.GetService<CodespacesUrlRewriter>();
+            string? baseUrlWithLoginToken = null;
+            string? codespacesUrlWithLoginToken = null;
+
+            if (!string.IsNullOrEmpty(apiBaseUrl))
+            {
+                baseUrlWithLoginToken = !string.IsNullOrEmpty(dashboardOptions.DashboardToken)
+                    ? $"{apiBaseUrl.TrimEnd('/')}/login?t={dashboardOptions.DashboardToken}"
+                    : apiBaseUrl;
+
+                var rewrittenUrl = codespacesUrlRewriter?.RewriteUrl(baseUrlWithLoginToken);
+                if (rewrittenUrl != baseUrlWithLoginToken)
+                {
+                    codespacesUrlWithLoginToken = rewrittenUrl;
+                }
+            }
+
+            activity.SetDashboardHealthy(true);
+            activity.SetDashboardUrlSource(apiBaseUrlSource);
+
+            return new DashboardConnectionInfo
+            {
+                IsHealthy = true,
+                ApiBaseUrl = apiBaseUrl,
+                ApiToken = dashboardOptions.ApiKey,
+                BaseUrlWithLoginToken = baseUrlWithLoginToken,
+                CodespacesUrlWithLoginToken = codespacesUrlWithLoginToken
+            };
+        }
+        catch (Exception ex)
+        {
+            activity.SetError(ex);
+            throw;
+        }
+    }
+
+    /// <summary>
+    /// Gets the dashboard URLs for the running AppHost.
+    /// Waits for the dashboard to become healthy before returning.
+    /// </summary>
+    /// <param name="serviceProvider">The service provider.</param>
+    /// <param name="logger">The logger for diagnostic output.</param>
+    /// <param name="cancellationToken">A cancellation token.</param>
+    /// <returns>The dashboard URL state including health and resolved dashboard URLs.</returns>
     public static async Task<DashboardUrlsState> GetDashboardUrlsAsync(
         IServiceProvider serviceProvider,
         ILogger logger,
         CancellationToken cancellationToken = default)
     {
-        var resourceNotificationService = serviceProvider.GetRequiredService<ResourceNotificationService>();
-
-        // Wait for the dashboard to be healthy before returning the URL. This is to ensure that the
-        // endpoint for the resource is available and the dashboard is ready to be used. This helps
-        // avoid some issues with port forwarding in devcontainer/codespaces scenarios.
-        try
+        var info = await GetDashboardConnectionInfoAsync(serviceProvider, logger, cancellationToken).ConfigureAwait(false);
+        return new DashboardUrlsState
         {
-            await resourceNotificationService.WaitForResourceHealthyAsync(
-                KnownResourceNames.AspireDashboard,
-                WaitBehavior.StopOnResourceUnavailable,
-                cancellationToken).ConfigureAwait(false);
-        }
-        catch (DistributedApplicationException ex)
-        {
-            logger.LogWarning(ex, "An error occurred while waiting for the Aspire Dashboard to become healthy.");
-
-            return new DashboardUrlsState
-            {
-                DashboardHealthy = false,
-                BaseUrlWithLoginToken = null,
-                CodespacesUrlWithLoginToken = null
-            };
-        }
-
-        var dashboardOptions = serviceProvider.GetService<IOptions<DashboardOptions>>();
-
-        if (dashboardOptions is null)
-        {
-            logger.LogWarning("Dashboard options not found.");
-            throw new InvalidOperationException("Dashboard options not found.");
-        }
-
-        // Get the actual allocated URL from the dashboard resource endpoint
-        var appModel = serviceProvider.GetService<DistributedApplicationModel>();
-        string? dashboardUrl = null;
-
-        if (appModel?.Resources.SingleOrDefault(r => StringComparers.ResourceName.Equals(r.Name, KnownResourceNames.AspireDashboard)) is IResourceWithEndpoints dashboardResource)
-        {
-            // Try HTTPS first, then HTTP
-            var httpsEndpoint = dashboardResource.GetEndpoint("https");
-            var httpEndpoint = dashboardResource.GetEndpoint("http");
-
-            var endpoint = httpsEndpoint.Exists ? httpsEndpoint : httpEndpoint;
-            if (endpoint.Exists)
-            {
-                dashboardUrl = await endpoint.GetValueAsync(cancellationToken).ConfigureAwait(false);
-            }
-        }
-
-        // Fall back to configured URL if we couldn't get it from the resource
-        if (string.IsNullOrEmpty(dashboardUrl))
-        {
-            if (!StringUtils.TryGetUriFromDelimitedString(dashboardOptions.Value.DashboardUrl, ";", out var dashboardUri))
-            {
-                logger.LogWarning("Dashboard URL could not be parsed from dashboard options.");
-                throw new InvalidOperationException("Dashboard URL could not be parsed from dashboard options.");
-            }
-            dashboardUrl = dashboardUri.GetLeftPart(UriPartial.Authority);
-        }
-
-        var codespacesUrlRewriter = serviceProvider.GetService<CodespacesUrlRewriter>();
-
-        var baseUrlWithLoginToken = $"{dashboardUrl.TrimEnd('/')}/login?t={dashboardOptions.Value.DashboardToken}";
-        var codespacesUrlWithLoginToken = codespacesUrlRewriter?.RewriteUrl(baseUrlWithLoginToken);
-
-        if (baseUrlWithLoginToken == codespacesUrlWithLoginToken)
-        {
-            return new DashboardUrlsState
-            {
-                DashboardHealthy = true,
-                BaseUrlWithLoginToken = baseUrlWithLoginToken,
-                CodespacesUrlWithLoginToken = null
-            };
-        }
-        else
-        {
-            return new DashboardUrlsState
-            {
-                DashboardHealthy = true,
-                BaseUrlWithLoginToken = baseUrlWithLoginToken,
-                CodespacesUrlWithLoginToken = codespacesUrlWithLoginToken
-            };
-        }
+            DashboardHealthy = info.IsHealthy,
+            BaseUrlWithLoginToken = info.BaseUrlWithLoginToken,
+            CodespacesUrlWithLoginToken = info.CodespacesUrlWithLoginToken
+        };
     }
+}
+
+/// <summary>
+/// Contains all dashboard connection information.
+/// </summary>
+internal sealed class DashboardConnectionInfo
+{
+    public static readonly DashboardConnectionInfo Unhealthy = new() { IsHealthy = false };
+
+    public bool IsHealthy { get; init; }
+    public string? ApiBaseUrl { get; init; }
+    public string? ApiToken { get; init; }
+    /// <summary>
+    /// Gets the resolved dashboard URL.
+    /// When browser token authentication is enabled, this value includes the login token.
+    /// </summary>
+    public string? BaseUrlWithLoginToken { get; init; }
+    /// <summary>
+    /// Gets the resolved Codespaces dashboard URL, if available.
+    /// When browser token authentication is enabled, this value includes the login token.
+    /// </summary>
+    public string? CodespacesUrlWithLoginToken { get; init; }
 }

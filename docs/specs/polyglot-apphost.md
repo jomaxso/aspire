@@ -29,7 +29,7 @@ The polyglot apphost feature allows developers to write Aspire app hosts in non-
 
 You run `aspire run`, and the CLI starts both the .NET AppHost server and your guest runtime locally on the same machine.
 
-**No IDL required.** Unlike gRPC/protobuf or OpenAPI, ATS doesn't introduce a separate interface definition language. The .NET type system is already expressive enough. Integration authors simply add `[AspireExport]` attributes to existing extension methods—their C# code *is* the schema. The scanner extracts everything it needs from the compiled assemblies.
+**No IDL required.** Unlike gRPC/protobuf or OpenAPI, ATS doesn't introduce a separate interface definition language. The .NET type system is already expressive enough. Integration authors annotate their existing APIs with `[AspireExport]`, `[AspireDto]`, and `[AspireValue]` as needed—their C# code *is* the schema. The scanner extracts everything it needs from the compiled assemblies.
 
 **Key Concepts:**
 - **Primitive** - JSON-native types (`string`, `number`, `boolean`, `null`) that serialize directly
@@ -38,12 +38,13 @@ You run `aspire run`, and the CLI starts both the .NET AppHost server and your g
 - **Handle** - An opaque typed reference to a .NET object
 - **DTO** - A serializable data transfer object (marked with `[AspireDto]`)
 - **Enum** - A .NET enum type that serializes as its string name
+- **Exported Value** - An immutable predefined value (marked with `[AspireValue]`) emitted into guest SDK catalogs
 
 ---
 
 ## Design Philosophy
 
-ATS leverages .NET's rich type system rather than replacing it. The `[AspireExport]` and `[AspireDto]` attributes mark what should be exposed—the rest is inferred from the C# signatures. This means:
+ATS leverages .NET's rich type system rather than replacing it. The `[AspireExport]`, `[AspireDto]`, and `[AspireValue]` attributes mark what should be exposed—the rest is inferred from the C# signatures. This means:
 
 - Integration authors write **normal C# extension methods**
 - The scanner **extracts types, parameters, and relationships** at build time
@@ -342,6 +343,8 @@ public class RedisResource : ContainerResource { }
 // Type ID = Aspire.Hosting/Aspire.Hosting.IDistributedApplicationBuilder
 ```
 
+Assembly-level exports are the mechanism for exposing framework or third-party types that live in a different assembly than the capabilities that use them. Even in that case, the ATS type ID still comes from the exported CLR type's assembly and full type name, not from the assembly that declares the attribute.
+
 ### Type Categories
 
 ATS categorizes types for serialization and code generation using `AtsTypeCategory`:
@@ -353,9 +356,11 @@ ATS categorizes types for serialization and code generation using `AtsTypeCatego
 | `Handle` | Opaque object references | `{ "$handle": "42", "$type": "..." }` |
 | `Dto` | Data transfer objects with `[AspireDto]` | JSON object |
 | `Callback` | Guest-provided delegate functions | String (callback ID) |
-| `Array` | Immutable arrays/readonly collections | JSON array (copied by value) |
+| `Array` | Immutable arrays/readonly collections (for example, `IReadOnlyList<T>`/`IEnumerable<T>`) | JSON array (copied by value) |
 | `List` | Mutable `List<T>` | Handle when exposed as property; JSON array when passed as parameter |
 | `Dict` | Mutable `Dictionary<K,V>` | Handle when exposed as property; JSON object when passed as parameter |
+
+In addition to these type categories, ATS can export **immutable value catalogs** with `[AspireValue]`. Exported values are snapped at scan time, serialized as JSON, and emitted directly into generated guest SDKs. They are not runtime handles or capabilities.
 
 ### Type System Notes (Compatibility and Semantics)
 
@@ -364,6 +369,7 @@ This section captures expectations that keep guest runtimes stable and APIs evol
 - **Type identity stability:** ATS type IDs are derived from `{AssemblyName}/{FullTypeName}`. Renames or namespace moves are breaking changes. Prefer additive changes or introduce new types.
 - **Nullability and optional parameters:** Use nullable types or optional parameters to express optionality. Guests should treat missing values and explicit `null` as equivalent only when the parameter is declared nullable.
 - **DTO evolution:** DTOs are structural JSON objects. Additive changes (new optional fields) are safer than renames/removals. Guests should ignore unknown DTO fields to remain forward-compatible.
+- **Exported value evolution:** Exported value paths (for example, `FoundryModels.OpenAI.Gpt41Mini`) are guest SDK surface area. Prefer additive catalogs over renaming or moving existing exported values.
 - **Enum evolution:** New enum members are non-breaking for hosts, but older guests may not recognize them. Guests should handle unknown enum strings defensively.
 - **Capabilities and versioning:** Capability IDs are stable and globally unique. Rename by adding a new capability ID and keeping the old one for compatibility.
 - **Handle lifetime:** Handles are valid only while the host process runs. Guests must handle `HANDLE_NOT_FOUND` when a handle is stale or disposed.
@@ -397,6 +403,25 @@ public static class ResourceExtensions
 ```
 
 Because `RedisResource` implements `IResourceWithEnvironment` (via `ContainerResource`), the scanner adds `withEnvironment` to `RedisResource`'s capability list.
+
+#### Cross-Assembly Type Exports
+
+Use `[assembly: AspireExport(typeof(T))]` when a capability assembly needs to expose a type defined in another assembly:
+
+```csharp
+// In Aspire.Hosting/Ats/AtsTypeMappings.cs
+[assembly: AspireExport(typeof(IConfiguration))]
+[assembly: AspireExport(typeof(IHostEnvironment), ExposeProperties = true)]
+```
+
+At startup, the remote host creates one ATS context by scanning all loaded assemblies together. That shared scan is what lets one assembly export a type while another assembly contributes capabilities that consume or return it.
+
+- **Type identity still comes from the exported CLR type.** For example, `[assembly: AspireExport(typeof(IConfiguration))]` produces the ATS type ID `Microsoft.Extensions.Configuration.Abstractions/Microsoft.Extensions.Configuration.IConfiguration`, even though the attribute is declared in `Aspire.Hosting`.
+- **Exported handle types are merged by ATS type ID across the full scan.** Re-exporting the same type from multiple assemblies does not create multiple ATS handle types.
+- **Capabilities are merged from all scanned assemblies, but capability IDs must remain unique.** If two assemblies export the same capability ID, scanning emits a diagnostic error.
+- **Cross-assembly resolution is scan-order independent.** If one assembly exports a type and another references it, the scanner resolves it after collecting the complete type universe from every scanned assembly.
+
+This is how Aspire's core hosting assembly exports framework types such as `IConfiguration`, `IConfigurationSection`, and `IHostEnvironment` while keeping them in the same flattened capability model as types exported directly from integration packages.
 
 #### Flattening in Action
 
@@ -504,6 +529,41 @@ public sealed class ContainerMountOptions
 | Input (JSON → .NET) | Deserialized | **Error** |
 | Output (.NET → JSON) | Serialized | Marshaled as Handle |
 
+### Exported Values
+
+Immutable predefined values can be emitted into generated guest SDKs with `[AspireValue]`:
+
+```csharp
+[AspireDto]
+public sealed class FoundryModel
+{
+    public required string Name { get; init; }
+    public required string Version { get; init; }
+    public required string Format { get; init; }
+
+    public static class OpenAI
+    {
+        [AspireValue("FoundryModels")]
+        public static readonly FoundryModel Gpt41Mini = new()
+        {
+            Name = "gpt-4.1-mini",
+            Version = "2025-04-14",
+            Format = "OpenAI"
+        };
+    }
+}
+```
+
+Guest SDKs receive a separate predefined-value catalog while the DTO shape remains unchanged. For example, guest code can use `FoundryModels.OpenAI.Gpt41Mini` anywhere a `FoundryModel` DTO is accepted.
+
+Exported values are intended for immutable, side-effect-free members only:
+
+- Public static readonly fields
+- Public static get-only properties
+- Value types limited to primitives, enums, DTOs, and copied JSON-compatible shapes
+
+They are evaluated during scanning, not invoked dynamically at runtime.
+
 ### Enums
 
 .NET enum types are fully supported and generate typed enums in guest languages. Enums serialize as their string member names:
@@ -562,6 +622,14 @@ Callbacks are passed as string IDs **when invoking a capability that accepts a d
 ```
 
 When the host later invokes that callback, arguments use **positional keys** (`p0`, `p1`, ...), not parameter names. See [invokeCallback](#invokecallback-host--guest) for the wire format.
+
+`CancellationToken` is special in generated TypeScript:
+
+- **User-authored inputs** accept `AbortSignal | CancellationToken`
+- **Host-provided values** are materialized as `CancellationToken`
+
+This keeps local TypeScript ergonomic while preserving remote token handles that
+need to round-trip back through the transport layer.
 
 #### Callback Handle Wrapping (TypeScript)
 
@@ -755,9 +823,10 @@ Cancellation tokens enable cooperative cancellation of long-running callbacks.
 
 **Token flow:**
 1. Host creates token when invoking a callback that accepts `CancellationToken`
-2. Host passes token ID in callback args as `$cancellationToken`
-3. Guest can cancel by calling `cancelToken` RPC method
-4. Host disposes token when callback completes
+2. If `CancellationToken` is part of the callback signature, the host passes the token ID in the matching positional `pN` argument
+3. Host also includes the same token ID as `$cancellationToken` metadata for transport-level cancellation wiring
+4. Guest can cancel by calling `cancelToken` RPC method
+5. Host disposes token when callback completes
 
 ```json
 // Callback request with cancellation token
@@ -765,6 +834,7 @@ Cancellation tokens enable cooperative cancellation of long-running callbacks.
     "callback_1_1234567890",
     {
         "p0": {"$handle": "5", "$type": "Aspire.Hosting/Aspire.Hosting.ApplicationModel.EnvironmentCallbackContext"},
+        "p1": "ct_a1b2c3d4-e5f6-7890-abcd-ef1234567890",
         "$cancellationToken": "ct_a1b2c3d4-e5f6-7890-abcd-ef1234567890"
     }
 ]}
@@ -857,7 +927,7 @@ Fields starting with `$` are reserved for ATS protocol metadata:
 |------|------------|---------------|
 | Handle | `{ "$handle": "42", "$type": "Assembly/Namespace.Type" }` | Always handle |
 | DTO | Plain object (requires `[AspireDto]`) | Copied by value |
-| Array/IReadOnlyList | JSON array | Copied by value |
+| Array/IReadOnlyList/IEnumerable | JSON array | Copied by value |
 | `List<T>` | JSON array (parameter) or Handle (return/property) | Handle if returned |
 | `Dictionary<K,V>` | JSON object (parameter) or Handle (return/property) | Handle if returned |
 | Nullable | Value or `null` | Same as inner type |
@@ -887,9 +957,9 @@ The CLI generates language-specific SDKs from ATS capabilities.
 ### Process
 
 1. Load assemblies from AppHost server build
-2. Scan for `[AspireExport]` attributes using `AtsCapabilityScanner`
+2. Scan for `[AspireExport]`, `[AspireDto]`, and `[AspireValue]` metadata using `AtsCapabilityScanner`
 3. Expand interface targets to concrete implementations
-4. Generate language-specific SDK
+4. Generate language-specific SDK, including predefined value catalogs
 
 ### Capability Expansion
 
@@ -971,6 +1041,7 @@ Primitive type mapping:
 | `number` | `number` |
 | `boolean` | `boolean` |
 | `any` | `any` |
+| `CancellationToken` | `CancellationToken` for returned/host-provided values; `AbortSignal \| CancellationToken` for generated input parameters |
 | `{Assembly}/{Type}` | `Handle<'{Assembly}/{Type}'>` (typed handle alias) |
 
 ---
@@ -1013,6 +1084,32 @@ const api = await builder
 // Build and run
 await builder.build().run();
 ```
+
+### Cancellation Ergonomics
+
+Generated TypeScript APIs accept either `AbortSignal` or `CancellationToken`
+for user-supplied cancellation input.
+
+Use `AbortSignal` when you create cancellation in TypeScript:
+
+```typescript
+const controller = new AbortController();
+const connectionStringExpression = await db.uriExpression.get();
+const connectionString = await connectionStringExpression.getValue(controller.signal);
+```
+
+When the host gives you a token through callback context or another generated API,
+the generated SDK returns a `CancellationToken` so the remote handle can be passed
+through other generated calls without losing identity:
+
+```typescript
+const cancellationToken = await context.cancellationToken.get();
+const connectionStringExpression = await db.uriExpression.get();
+const connectionString = await connectionStringExpression.getValue(cancellationToken);
+```
+
+Both shapes are accepted by generated input parameters, so local and remote
+cancellation can be mixed naturally in the same AppHost.
 
 ### Fluent Async Chaining
 
@@ -1289,7 +1386,7 @@ public interface ICodeGenerator
 }
 ```
 
-The generator receives an `AtsContext` containing all scanned capabilities, types, DTOs, and enums. It produces language-specific SDK files.
+The generator receives an `AtsContext` containing all scanned capabilities, types, DTOs, enums, and exported values. It produces language-specific SDK files.
 
 ### Step 2: Register in CLI
 
@@ -1378,6 +1475,7 @@ public sealed class AtsContext
     public IReadOnlyList<AtsTypeInfo> HandleTypes { get; init; }
     public IReadOnlyList<AtsDtoTypeInfo> DtoTypes { get; init; }
     public IReadOnlyList<AtsEnumTypeInfo> EnumTypes { get; init; }
+    public IReadOnlyList<AtsExportedValueInfo> ExportedValues { get; init; }
     public IReadOnlyList<AtsDiagnostic> Diagnostics { get; init; }
 }
 ```
@@ -1396,11 +1494,17 @@ public sealed class AtsContext
 - `Name` - Simple enum name (e.g., `ContainerLifetime`)
 - `Values` - List of enum member names
 
+**AtsExportedValueInfo** contains:
+- `PathSegments` - Guest SDK catalog path segments (for example, `["FoundryModels", "OpenAI", "Gpt41Mini"]`)
+- `Type` - ATS type metadata for the snapped value
+- `Value` - Snapped JSON payload emitted into guest SDKs
+- `Description` - Optional XML documentation summary
+
 **Generation steps:**
 
 1. Group capabilities by target type
 2. Generate builder classes with methods for each capability
-3. Generate DTO classes, enums, handle wrappers
+3. Generate DTO classes, enums, exported value catalogs, and handle wrappers
 4. Implement JSON-RPC client for the language
 
 ---
@@ -1414,7 +1518,7 @@ This section explains how to develop and test custom language SDKs using a local
 1. Clone the Aspire repository:
 
    ```bash
-   git clone https://github.com/dotnet/aspire.git
+   git clone https://github.com/microsoft/aspire.git
    cd aspire
    ```
 
@@ -1425,24 +1529,9 @@ This section explains how to develop and test custom language SDKs using a local
    ./build.cmd  # Windows
    ```
 
-### Enabling Polyglot Support
+### Polyglot Support
 
-Polyglot support is behind a feature flag that must be enabled before you can use non-.NET languages. Enable it using the `aspire config` command:
-
-```bash
-# Enable polyglot support globally (recommended for SDK development)
-aspire config set features:polyglotSupportEnabled true --global
-
-# Or enable it locally for a specific project
-aspire config set features:polyglotSupportEnabled true
-```
-
-This enables the `--language` option on `aspire init` and `aspire new` commands, and allows the CLI to detect and run non-.NET app hosts.
-
-> **Note:** When running the CLI from source with `dotnet run`, use the full command:
-> ```bash
-> dotnet run --project /path/to/aspire/src/Aspire.Cli/Aspire.Cli.csproj -- config set features:polyglotSupportEnabled true --global
-> ```
+Polyglot support is enabled by default. The `--language` option is available on `aspire init` and `aspire new`, and the CLI can detect and run non-.NET AppHosts without additional configuration.
 
 ### Setting Up Local Development Mode
 
@@ -1469,10 +1558,10 @@ Use `dotnet run` to execute the CLI directly from source:
 
 ```bash
 # Create a new Python app
-dotnet run --project /path/to/aspire/src/Aspire.Cli/Aspire.Cli.csproj -- init -l python
+dotnet run --project /path/to/aspire/src/Aspire.Cli/Aspire.Cli.csproj -- init --language python
 
 # Create a new TypeScript app
-dotnet run --project /path/to/aspire/src/Aspire.Cli/Aspire.Cli.csproj -- init -l typescript
+dotnet run --project /path/to/aspire/src/Aspire.Cli/Aspire.Cli.csproj -- init --language typescript
 ```
 
 The `-l` (or `--language`) flag specifies the target language for scaffolding.
@@ -1495,7 +1584,7 @@ The `-d` (or `--debug`) flag enables additional diagnostic output, useful when d
 
 2. **Testing code generators**: Modify your `ICodeGenerator` implementation, then run `aspire run` in a test app—the new generated code will be produced automatically.
 
-3. **Testing language support**: Modify your `ILanguageSupport` implementation, then use `aspire init -l <language>` to test scaffolding or `aspire run` to test detection and execution.
+3. **Testing language support**: Modify your `ILanguageSupport` implementation, then use `aspire init --language <language>` to test scaffolding or `aspire run` to test detection and execution.
 
 4. **Inspecting generated code**: Check the `.modules/` folder in your test app to see the generated SDK files and verify they match your expectations.
 
@@ -1503,8 +1592,8 @@ The `-d` (or `--debug`) flag enables additional diagnostic output, useful when d
 
 | Task | Command |
 |------|---------|
-| Scaffold Python app | `dotnet run --project $ASPIRE_REPO_ROOT/src/Aspire.Cli/Aspire.Cli.csproj -- init -l python` |
-| Scaffold TypeScript app | `dotnet run --project $ASPIRE_REPO_ROOT/src/Aspire.Cli/Aspire.Cli.csproj -- init -l typescript` |
+| Scaffold Python app | `dotnet run --project $ASPIRE_REPO_ROOT/src/Aspire.Cli/Aspire.Cli.csproj -- init --language python` |
+| Scaffold TypeScript app | `dotnet run --project $ASPIRE_REPO_ROOT/src/Aspire.Cli/Aspire.Cli.csproj -- init --language typescript` |
 | Run app | `dotnet run --project $ASPIRE_REPO_ROOT/src/Aspire.Cli/Aspire.Cli.csproj -- run` |
 | Run with debug output | `dotnet run --project $ASPIRE_REPO_ROOT/src/Aspire.Cli/Aspire.Cli.csproj -- run -d` |
 | Add integration | `dotnet run --project $ASPIRE_REPO_ROOT/src/Aspire.Cli/Aspire.Cli.csproj -- add` |

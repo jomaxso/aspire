@@ -1,6 +1,7 @@
 // Licensed to the .NET Foundation under one or more agreements.
 // The .NET Foundation licenses this file to you under the MIT license.
 
+using Microsoft.AspNetCore.InternalTesting;
 using System.Diagnostics;
 using Aspire.Cli.Telemetry;
 using Microsoft.Extensions.Logging;
@@ -21,6 +22,19 @@ public class AspireCliTelemetryTests
         Assert.NotNull(activity);
         Assert.Equal("test-activity", activity.OperationName);
         Assert.Equal(ActivityKind.Internal, activity.Kind);
+    }
+
+    [Fact]
+    public void StartReportedActivity_WithParentContext_CreatesChildActivity()
+    {
+        using var fixture = new TelemetryFixture(sampleResult: ActivitySamplingResult.AllData);
+        var parentContext = ActivityContext.Parse("00-0102030405060708090a0b0c0d0e0f10-1112131415161718-01", null);
+
+        using var activity = fixture.Telemetry.StartReportedActivity("test-activity", ActivityKind.Internal, parentContext);
+
+        Assert.NotNull(activity);
+        Assert.Equal(parentContext.TraceId, activity.TraceId);
+        Assert.Equal(parentContext.SpanId, activity.ParentSpanId);
     }
 
     [Fact]
@@ -53,6 +67,19 @@ public class AspireCliTelemetryTests
         Assert.NotNull(activity);
         Assert.Equal("test-client", activity.OperationName);
         Assert.Equal(ActivityKind.Client, activity.Kind);
+    }
+
+    [Fact]
+    public void StartDiagnosticActivity_WithParentContext_CreatesChildActivity()
+    {
+        using var fixture = new TelemetryFixture(sampleResult: ActivitySamplingResult.AllData);
+        var parentContext = ActivityContext.Parse("00-1112131415161718191a1b1c1d1e1f20-2122232425262728-01", null);
+
+        using var activity = fixture.Telemetry.StartDiagnosticActivity("test-activity", ActivityKind.Internal, parentContext);
+
+        Assert.NotNull(activity);
+        Assert.Equal(parentContext.TraceId, activity.TraceId);
+        Assert.Equal(parentContext.SpanId, activity.ParentSpanId);
     }
 
     [Fact]
@@ -198,6 +225,20 @@ public class AspireCliTelemetryTests
     }
 
     [Fact]
+    public void InitializeAsync_AddsOsInformationTags()
+    {
+        using var fixture = new TelemetryFixture();
+
+        var tags = fixture.Telemetry.GetDefaultTags();
+
+        var expectedOsName = AspireCliTelemetry.GetOsName();
+        var expectedOsType = AspireCliTelemetry.GetOsType();
+        Assert.Contains(tags, t => t.Key == TelemetryConstants.Tags.OsName && (string?)t.Value == expectedOsName);
+        Assert.Contains(tags, t => t.Key == TelemetryConstants.Tags.OsVersion && t.Value is string s && s == Environment.OSVersion.Version.ToString());
+        Assert.Contains(tags, t => t.Key == TelemetryConstants.Tags.OsType && (string?)t.Value == expectedOsType);
+    }
+
+    [Fact]
     public void StartReportedActivity_IncludesAllDefaultTags()
     {
         var machineInfoProvider = new TelemetryFixture.TestMachineInformationProvider
@@ -239,7 +280,7 @@ public class AspireCliTelemetryTests
         var ciDetector = new TelemetryFixture.TestCIEnvironmentDetector();
         var telemetry = new AspireCliTelemetry(NullLogger<AspireCliTelemetry>.Instance, provider, ciDetector);
 
-        await telemetry.InitializeAsync();
+        await telemetry.InitializeAsync().DefaultTimeout();
         var tagsAfterFirstInit = telemetry.GetDefaultTags().Count;
         await telemetry.InitializeAsync(); // Should not throw
 

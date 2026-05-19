@@ -133,7 +133,7 @@ configured. See [Local Azure Provisioning](https://aspire.dev/integrations/cloud
 ```markdown
 ## Feedback & contributing
 
-https://github.com/dotnet/aspire
+https://github.com/microsoft/aspire
 ```
 
 **Guidelines:**
@@ -195,7 +195,7 @@ https://aspire.dev/integrations/databases/postgresql-extensions/
 
 ## Feedback & contributing
 
-https://github.com/dotnet/aspire
+https://github.com/microsoft/aspire
 
 _*Postgres*, *PostgreSQL* and the *Slonik Logo* are trademarks or registered trademarks of the *PostgreSQL Community Association of Canada*, and used with their permission._
 ````
@@ -226,7 +226,7 @@ Update hosting integration README.md files when:
 - Changing the primary usage pattern
 - Adding emulator support
 - Updating prerequisites or installation steps
-- New Microsoft Learn documentation becomes available
+- New aspire.dev documentation becomes available
 
 ## Review Checklist
 
@@ -237,7 +237,7 @@ When reviewing or creating a hosting integration README.md:
 - [ ] Installation section uses correct package name and `dotnetcli` code block
 - [ ] Usage example shows `Add{Technology}` method with `WithReference` pattern
 - [ ] Usage example uses appropriate variable names and resource names
-- [ ] "Additional documentation" section includes relevant Microsoft Learn links
+- [ ] "Additional documentation" section includes relevant aspire.dev links
 - [ ] "Feedback & contributing" section is present at the end
 - [ ] Trademark notices are included if applicable
 - [ ] No configuration details that belong in client integration READMEs

@@ -141,7 +141,7 @@ public class FrontendBrowserTokenAuthTests
         using var client = new HttpClient { BaseAddress = new Uri($"http://{app.FrontendSingleEndPointAccessor().EndPoint}") };
 
         // Act
-        var response = await client.PostAsync("/api/validatetoken?token=" + requestToken, content: null).DefaultTimeout();
+        var response = await client.PostAsJsonAsync("/api/validatetoken", new { Token = requestToken }).DefaultTimeout();
 
         // Assert
         Assert.Equal(statusCode, response.StatusCode);
@@ -171,51 +171,45 @@ public class FrontendBrowserTokenAuthTests
         Assert.Collection(l,
             w =>
             {
-                Assert.Equal("Aspire version: {Version}", GetValue(w.State, "{OriginalFormat}"));
+                Assert.Equal("Aspire dashboard version: {Version}", LogTestHelpers.GetValue(w, "{OriginalFormat}"));
             },
             w =>
             {
-                Assert.Equal("Now listening on: {DashboardUri}", GetValue(w.State, "{OriginalFormat}"));
+                Assert.Equal("Now listening on: {DashboardUri}", LogTestHelpers.GetValue(w, "{OriginalFormat}"));
 
-                var uri = new Uri((string)GetValue(w.State, "DashboardUri")!);
+                var uri = new Uri((string)LogTestHelpers.GetValue(w, "DashboardUri")!);
                 Assert.NotEqual(0, uri.Port);
             },
             w =>
             {
-                Assert.Equal("OTLP/gRPC listening on: {OtlpEndpointUri}", GetValue(w.State, "{OriginalFormat}"));
+                Assert.Equal("OTLP/gRPC listening on: {OtlpEndpointUri}", LogTestHelpers.GetValue(w, "{OriginalFormat}"));
 
-                var uri = new Uri((string)GetValue(w.State, "OtlpEndpointUri")!);
+                var uri = new Uri((string)LogTestHelpers.GetValue(w, "OtlpEndpointUri")!);
                 Assert.NotEqual(0, uri.Port);
             },
             w =>
             {
-                Assert.Equal("OTLP/HTTP listening on: {OtlpEndpointUri}", GetValue(w.State, "{OriginalFormat}"));
+                Assert.Equal("OTLP/HTTP listening on: {OtlpEndpointUri}", LogTestHelpers.GetValue(w, "{OriginalFormat}"));
 
-                var uri = new Uri((string)GetValue(w.State, "OtlpEndpointUri")!);
+                var uri = new Uri((string)LogTestHelpers.GetValue(w, "OtlpEndpointUri")!);
                 Assert.NotEqual(0, uri.Port);
             },
             w =>
             {
-                Assert.Equal("MCP listening on: {McpEndpointUri}", GetValue(w.State, "{OriginalFormat}"));
-
-                var uri = new Uri((string)GetValue(w.State, "McpEndpointUri")!);
-                Assert.NotEqual(0, uri.Port);
-            },
-            w =>
-            {
-                Assert.Equal("OTLP server is unsecured. Untrusted apps can send telemetry to the dashboard. For more information, visit https://go.microsoft.com/fwlink/?linkid=2267030", GetValue(w.State, "{OriginalFormat}"));
+                Assert.Equal("OTLP server is unsecured. Untrusted apps can send telemetry to the dashboard. For more information, visit https://go.microsoft.com/fwlink/?linkid=2267030", LogTestHelpers.GetValue(w, "{OriginalFormat}"));
                 Assert.Equal(LogLevel.Warning, w.LogLevel);
             },
             w =>
             {
-                Assert.Equal("MCP server is unsecured. Untrusted apps can access sensitive information.", GetValue(w.State, "{OriginalFormat}"));
+                Assert.Equal("Dashboard API is unsecured. Untrusted apps can access sensitive telemetry data.", LogTestHelpers.GetValue(w, "{OriginalFormat}"));
                 Assert.Equal(LogLevel.Warning, w.LogLevel);
             },
             w =>
             {
-                Assert.Equal("Login to the dashboard at {DashboardLoginUrl}", GetValue(w.State, "{OriginalFormat}"));
+                Assert.StartsWith("Aspire Dashboard", (string)LogTestHelpers.GetValue(w, "{OriginalFormat}")!);
 
-                var uri = new Uri((string)GetValue(w.State, "DashboardLoginUrl")!, UriKind.Absolute);
+                var loginUrl = (string)LogTestHelpers.GetValue(w, "LoginUrl")!;
+                var uri = new Uri(loginUrl, UriKind.Absolute);
                 var queryString = HttpUtility.ParseQueryString(uri.Query);
                 Assert.NotNull(queryString["t"]);
             });
@@ -242,10 +236,11 @@ public class FrontendBrowserTokenAuthTests
         // Assert
         var l = testSink.Writes.Where(w => w.LoggerName == typeof(DashboardWebApplication).FullName).ToList();
 
-        // Testing via the log template is kind of hacky. If this becomes a problem then consider adding proper log definitions and match via ID.
-        var loginLinkLog = l.Single(w => "Login to the dashboard at {DashboardLoginUrl}" == (string?)GetValue(w.State, "{OriginalFormat}"));
+        // The login URL is now part of the summary log message.
+        var summaryLog = l.Single(w => ((string?)LogTestHelpers.GetValue(w, "{OriginalFormat}"))?.StartsWith("Aspire Dashboard") == true);
 
-        var uri = new Uri((string)GetValue(loginLinkLog.State, "DashboardLoginUrl")!, UriKind.Absolute);
+        var loginUrl = (string)LogTestHelpers.GetValue(summaryLog, "LoginUrl")!;
+        var uri = new Uri(loginUrl, UriKind.Absolute);
         var queryString = HttpUtility.ParseQueryString(uri.Query);
         Assert.NotNull(queryString["t"]);
 
@@ -269,13 +264,9 @@ public class FrontendBrowserTokenAuthTests
         // Assert
         var l = testSink.Writes.Where(w => w.LoggerName == typeof(DashboardWebApplication).FullName).ToList();
 
-        // Testing via the log template is kind of hacky. If this becomes a problem then consider adding proper log definitions and match via ID.
-        Assert.Single(l, w => (string?)GetValue(w.State, "{OriginalFormat}") == "Login to the dashboard at {DashboardLoginUrl} . The URL may need changes depending on how network access to the container is configured.");
-    }
-
-    private static object? GetValue(object? values, string key)
-    {
-        var list = values as IReadOnlyList<KeyValuePair<string, object>>;
-        return list?.SingleOrDefault(kvp => kvp.Key == key).Value;
+        // The container message is now part of the summary log message.
+        var summaryLog = l.Single(w => ((string?)LogTestHelpers.GetValue(w, "{OriginalFormat}"))?.StartsWith("Aspire Dashboard") == true);
+        var containerMessage = "URLs may need changes depending on how network access to the container is configured.";
+        Assert.Contains(containerMessage, summaryLog.Message);
     }
 }

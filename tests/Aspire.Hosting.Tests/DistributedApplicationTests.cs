@@ -3,9 +3,12 @@
 
 #pragma warning disable ASPIRECERTIFICATES001
 
+using System.Collections.Concurrent;
+using System.Diagnostics;
 using System.Globalization;
 using System.Text.RegularExpressions;
 using System.Threading.Channels;
+using Aspire.Hosting.Diagnostics;
 using Aspire.TestUtilities;
 using Aspire.Hosting.Dcp;
 using Aspire.Hosting.Dcp.Model;
@@ -20,10 +23,12 @@ using Aspire.Hosting.Tests.Utils;
 using Aspire.Hosting.Utils;
 using k8s.Models;
 using Microsoft.AspNetCore.InternalTesting;
+using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Diagnostics.HealthChecks;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Options;
 using Xunit.Sdk;
 using TestConstants = Microsoft.AspNetCore.InternalTesting.TestConstants;
@@ -32,6 +37,7 @@ using System.Security.Cryptography.X509Certificates;
 
 namespace Aspire.Hosting.Tests;
 
+[Trait("Partition", "1")]
 public class DistributedApplicationTests
 {
     private readonly ITestOutputHelper _testOutputHelper;
@@ -121,6 +127,62 @@ public class DistributedApplicationTests
     }
 
     [Fact]
+    public async Task RunAsync_RecordsAppHostStartActivityForBeforeStartFailure()
+    {
+        var exceptionMessage = "Exception from lifecycle hook to prove startup failures are traced!";
+        var activities = new ConcurrentBag<Activity>();
+        using var listener = CreateActivityListener(ProfilingTelemetry.ActivitySourceName, activities.Add);
+
+        using var testProgram = CreateTestProgram("runasync-start-activity-before-start-failure", includeIntegrationServices: false);
+        testProgram.AppBuilder.Configuration[KnownConfigNames.ProfilingEnabled] = "true";
+#pragma warning disable CS0618 // Lifecycle hooks are obsolete, but still need to be tested until removed.
+        testProgram.AppBuilder.Services.AddLifecycleHook(_ =>
+        {
+            return new CallbackLifecycleHook((_, _) =>
+            {
+                throw new DistributedApplicationException(exceptionMessage);
+            });
+        });
+#pragma warning restore CS0618 // Lifecycle hooks are obsolete, but still need to be tested until removed.
+
+        var ex = await Assert.ThrowsAsync<DistributedApplicationException>(async () =>
+        {
+            await testProgram.RunAsync();
+        }).DefaultTimeout(TestConstants.DefaultOrchestratorTestTimeout);
+
+        Assert.Equal(exceptionMessage, ex.Message);
+
+        var appHostStartActivity = Assert.Single(activities, activity => activity.OperationName == ProfilingTelemetry.Activities.AppHostStart);
+        Assert.Equal(nameof(DistributedApplication.RunAsync), appHostStartActivity.GetTagItem(ProfilingTelemetry.Tags.AppHostEntryPoint));
+        Assert.Equal(ActivityStatusCode.Error, appHostStartActivity.Status);
+        Assert.Contains(appHostStartActivity.Events, @event => @event.Name == ProfilingTelemetry.Events.Exception);
+    }
+
+    [Fact]
+    public async Task DistributedApplicationLifecycle_StopAsyncDisposesHostStartupActivityWhenStartupDoesNotComplete()
+    {
+        var configuration = CreateConfiguration((KnownConfigNames.ProfilingEnabled, "true"));
+        var activities = new ConcurrentBag<Activity>();
+        using var listener = CreateActivityListener(ProfilingTelemetry.ActivitySourceName, activities.Add);
+        var lifecycle = new DistributedApplicationLifecycle(
+            NullLogger<DistributedApplication>.Instance,
+            configuration,
+            new ProfilingTelemetry(configuration),
+            new DistributedApplicationExecutionContext(DistributedApplicationOperation.Run),
+            new LocaleOverrideContext());
+
+        await lifecycle.StartingAsync(CancellationToken.None);
+
+        Assert.Empty(activities);
+
+        await lifecycle.StopAsync(CancellationToken.None);
+
+        var hostStartupActivity = Assert.Single(activities, activity => activity.OperationName == ProfilingTelemetry.Activities.AppHostHostStartup);
+        Assert.DoesNotContain(hostStartupActivity.Events, @event => @event.Name == ProfilingTelemetry.Events.AppHostHostStarted);
+    }
+
+    [Fact]
+    [QuarantinedTest("https://github.com/microsoft/aspire/issues/15777")]
     public async Task StartResourceForcesStart()
     {
         using var testProgram = CreateTestProgram("force-resource-start");
@@ -369,6 +431,86 @@ public class DistributedApplicationTests
     }
 
     [Fact]
+    public async Task StartAsync_ThrowsWhenCancelled()
+    {
+        const string testName = "startasync-cancelled-during-startup";
+        using var testProgram = CreateTestProgram(testName, randomizePorts: false, includeIntegrationServices: false);
+
+        using var cts = new CancellationTokenSource();
+        testProgram.AppBuilder.Eventing.Subscribe<BeforeStartEvent>((_, cancellationToken) =>
+        {
+            cts.Cancel();
+            return Task.CompletedTask;
+        });
+
+        using var app = testProgram.Build();
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(async () =>
+        {
+            await app.StartAsync(cts.Token);
+        }).DefaultTimeout(TestConstants.DefaultOrchestratorTestTimeout);
+    }
+
+    [Fact]
+    public async Task StartAsync_ThrowsWhenStopped()
+    {
+        const string testName = "startasync-stopped-during-startup";
+        using var testProgram = CreateTestProgram(testName, randomizePorts: false, includeIntegrationServices: false);
+
+        testProgram.AppBuilder.Eventing.Subscribe<BeforeStartEvent>((evt, cancellationToken) =>
+        {
+            evt.Services.GetRequiredService<IHostApplicationLifetime>().StopApplication();
+            return Task.CompletedTask;
+        });
+
+        using var app = testProgram.Build();
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(async () =>
+        {
+            await app.StartAsync();
+        }).DefaultTimeout(TestConstants.DefaultOrchestratorTestTimeout);
+    }
+
+    [Fact]
+    public async Task RunAsync_ThrowsWhenCancelled()
+    {
+        const string testName = "runasync-cancelled-by-caller-during-startup";
+        using var testProgram = CreateTestProgram(testName, randomizePorts: false, includeIntegrationServices: false);
+        using var cts = new CancellationTokenSource();
+
+        testProgram.AppBuilder.Eventing.Subscribe<BeforeStartEvent>((_, cancellationToken) =>
+        {
+            cts.Cancel();
+            return Task.CompletedTask;
+        });
+
+        using var app = testProgram.Build();
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(async () =>
+        {
+            await app.RunAsync(cts.Token);
+        }).DefaultTimeout(TestConstants.DefaultOrchestratorTestTimeout);
+    }
+
+    [Fact]
+    public async Task RunAsync_DoesNotThrowWhenStopped()
+    {
+        const string testName = "runasync-stopped-during-startup";
+        using var testProgram = CreateTestProgram(testName, randomizePorts: false, includeIntegrationServices: false);
+
+        testProgram.AppBuilder.Eventing.Subscribe<BeforeStartEvent>((evt, cancellationToken) =>
+        {
+            // Simulate ctrl+c by a user
+            evt.Services.GetRequiredService<IHostApplicationLifetime>().StopApplication();
+            return Task.CompletedTask;
+        });
+
+        using var app = testProgram.Build();
+
+        await app.RunAsync().DefaultTimeout(TestConstants.DefaultOrchestratorTestTimeout);
+    }
+
+    [Fact]
     [RequiresFeature(TestFeature.Docker)]
     public async Task ExplicitStart_StartContainer()
     {
@@ -396,8 +538,16 @@ public class DistributedApplicationTests
         var startTask = app.StartAsync(token);
 
         // On start, one resource won't be started and the other is waiting on it.
-        var notStartedResourceEvent = await rns.WaitForResourceAsync(notStartedResourceName, e => e.Snapshot.State?.Text == KnownResourceStates.NotStarted, token).DefaultTimeout(TestConstants.LongTimeoutTimeSpan);
-        var dependentResourceEvent = await rns.WaitForResourceAsync(dependentResourceName, e => e.Snapshot.State?.Text == KnownResourceStates.Waiting, token).DefaultTimeout(TestConstants.LongTimeoutTimeSpan);
+        var notStartedResourceEvent = await rns.WaitForResourceAsync(
+            notStartedResourceName,
+            e => e.Snapshot.State?.Text == KnownResourceStates.NotStarted,
+            token
+        ).DefaultTimeout(TestConstants.LongTimeoutTimeSpan);
+        var dependentResourceEvent = await rns.WaitForResourceAsync(
+            dependentResourceName,
+            e => e.Snapshot.State?.Text == KnownResourceStates.Waiting,
+            token
+        ).DefaultTimeout(TestConstants.LongTimeoutTimeSpan);
 
         Assert.Collection(notStartedResourceEvent.Snapshot.Urls, u =>
         {
@@ -616,7 +766,7 @@ public class DistributedApplicationTests
     }
 
     [Fact]
-    [QuarantinedTest("https://github.com/dotnet/aspire/issues/9340")]
+    [QuarantinedTest("https://github.com/microsoft/aspire/issues/9340")]
     public async Task TestServicesWithMultipleReplicas()
     {
         var replicaCount = 3;
@@ -1472,8 +1622,7 @@ public class DistributedApplicationTests
         await using var app = testProgram.Build();
 
         var ex = await Assert.ThrowsAsync<InvalidOperationException>(async () => await app.StartAsync().DefaultTimeout(TestConstants.DefaultOrchestratorTestLongTimeout));
-        var suffix = app.Services.GetRequiredService<IOptions<DcpOptions>>().Value.ResourceNameSuffix;
-        Assert.Equal($"Resource '{testName}-servicea-{suffix}' uses multiple replicas and a proxy-less endpoint 'http'. These features do not work together.", ex.Message);
+        Assert.Equal($"Resource '{testName}-servicea' uses multiple replicas and a proxy-less endpoint 'http'. These features do not work together.", ex.Message);
     }
 
     [Fact]
@@ -1495,17 +1644,18 @@ public class DistributedApplicationTests
     }
 
     [Fact]
-    [QuarantinedTest("https://github.com/dotnet/aspire/issues/8728")]
+    [QuarantinedTest("https://github.com/microsoft/aspire/issues/8728")]
     public async Task ProxylessEndpointWorks()
     {
         const string testName = "proxyless-endpoint-works";
         using var testProgram = CreateTestProgram(testName);
 
+        var port = await Network.GetAvailablePortAsync();
         testProgram.ServiceABuilder
             .WithEndpoint("http", e =>
             {
-                e.Port = 1234;
-                e.TargetPort = 1234;
+                e.Port = port;
+                e.TargetPort = port;
                 e.IsProxied = false;
             });
 
@@ -1537,11 +1687,12 @@ public class DistributedApplicationTests
         const string testName = "proxyless-and-proxied-endpoints";
         using var testProgram = CreateTestProgram(testName);
 
+        var port = await Network.GetAvailablePortAsync();
         testProgram.ServiceABuilder
             .WithEndpoint("http", e =>
             {
-                e.Port = 1234;
-                e.TargetPort = 1234;
+                e.Port = port;
+                e.TargetPort = port;
                 e.IsProxied = false;
             }, createIfNotExists: false)
             .WithEndpoint("https", e =>
@@ -1607,7 +1758,8 @@ public class DistributedApplicationTests
         const string testName = "proxyless-container";
         using var builder = TestDistributedApplicationBuilder.Create(_testOutputHelper);
 
-        var redis = builder.AddRedis($"{testName}-redis", 1234).WithEndpoint("tcp", endpoint =>
+        var port = await Network.GetAvailablePortAsync();
+        var redis = builder.AddRedis($"{testName}-redis", port).WithEndpoint("tcp", endpoint =>
         {
             endpoint.IsProxied = false;
         });
@@ -1638,7 +1790,7 @@ public class DistributedApplicationTests
         var env = Assert.Single(service.Spec.Env!, e => e.Name == $"ConnectionStrings__{testName}-redis");
         var sslVal = redis.Resource.TlsEnabled ? ",ssl=true" : string.Empty;
 #pragma warning disable CS0618 // Type or member is obsolete
-        Assert.Equal($"localhost:1234,password={redis.Resource.PasswordParameter?.Value}{sslVal}", env.Value);
+        Assert.Equal($"localhost:{port},password={redis.Resource.PasswordParameter?.Value}{sslVal}", env.Value);
 #pragma warning restore CS0618 // Type or member is obsolete
 
         var list = await s.ListAsync<Container>().DefaultTimeout();
@@ -1646,11 +1798,11 @@ public class DistributedApplicationTests
         if (redis.Resource.TlsEnabled)
         {
             Assert.Equal(2, redisContainer.Spec.Ports!.Count);
-            Assert.Contains(redisContainer.Spec.Ports!, p => p.HostPort == 1234);
+            Assert.Contains(redisContainer.Spec.Ports!, p => p.HostPort == port);
         }
         else
         {
-            Assert.Equal(1234, Assert.Single(redisContainer.Spec.Ports!).HostPort);
+            Assert.Equal(port, Assert.Single(redisContainer.Spec.Ports!).HostPort);
         }
 
         var otherRedisEnv = Assert.Single(service.Spec.Env!, e => e.Name == $"ConnectionStrings__{testName}-redisNoPort");
@@ -1680,7 +1832,8 @@ public class DistributedApplicationTests
         const string testName = "endpoint-proxy-support";
         using var builder = TestDistributedApplicationBuilder.Create(_testOutputHelper);
 
-        var redis = builder.AddRedis($"{testName}-redis", 1234).WithEndpointProxySupport(false);
+        var port = await Network.GetAvailablePortAsync();
+        var redis = builder.AddRedis($"{testName}-redis", port).WithEndpointProxySupport(false);
 
         // Since port is not specified, this instance will use the container target port (6379) as the host port.
         var redisNoPort = builder.AddRedis($"{testName}-redisNoPort").WithEndpointProxySupport(false);
@@ -1710,7 +1863,7 @@ public class DistributedApplicationTests
         var env = Assert.Single(service.Spec.Env!, e => e.Name == $"ConnectionStrings__{testName}-redis");
         var sslVal = redis.Resource.TlsEnabled ? ",ssl=true" : string.Empty;
 #pragma warning disable CS0618 // Type or member is obsolete
-        Assert.Equal($"localhost:1234,password={redis.Resource.PasswordParameter!.Value}{sslVal}", env.Value);
+        Assert.Equal($"localhost:{port},password={redis.Resource.PasswordParameter!.Value}{sslVal}", env.Value);
 #pragma warning restore CS0618 // Type or member is obsolete
 
         var list = await s.ListAsync<Container>().DefaultTimeout();
@@ -1718,11 +1871,11 @@ public class DistributedApplicationTests
         if (redis.Resource.TlsEnabled)
         {
             Assert.Equal(2, redisContainer.Spec.Ports!.Count);
-            Assert.Contains(redisContainer.Spec.Ports!, p => p.HostPort == 1234);
+            Assert.Contains(redisContainer.Spec.Ports!, p => p.HostPort == port);
         }
         else
         {
-            Assert.Equal(1234, Assert.Single(redisContainer.Spec.Ports!).HostPort);
+            Assert.Equal(port, Assert.Single(redisContainer.Spec.Ports!).HostPort);
         }
 
         var otherRedisEnv = Assert.Single(service.Spec.Env!, e => e.Name == $"ConnectionStrings__{testName}-redisNoPort");
@@ -1889,6 +2042,34 @@ public class DistributedApplicationTests
         await app.StopAsync(token).DefaultTimeout(TestConstants.DefaultOrchestratorTestLongTimeout);
     }
 
+    [Theory]
+    [RequiresFeature(TestFeature.Docker)]
+    [InlineData(0)] // Success exit code
+    [InlineData(100)] // Failing (non-zero) exit code
+    public async Task ContainerExitsImmediatelyAfterStart(int exitCode)
+    {
+        const string testName = "container-exits-immediately";
+        using var testProgram = CreateTestProgram(testName);
+        
+        var containerResourceName = testName;
+        _ = testProgram.AppBuilder.AddContainer(containerResourceName, "alpine")
+            .WithEntrypoint("sh")
+            .WithArgs("-c", $"echo Hello World;exit {exitCode}");
+
+        using var app = testProgram.Build();
+        var rns = app.Services.GetRequiredService<ResourceNotificationService>();
+        using var cts = AsyncTestHelpers.CreateDefaultTimeoutTokenSource(TestConstants.ExtraLongTimeoutDuration);
+        var token = cts.Token;
+
+        var startTask = app.StartAsync(cts.Token);
+
+        // Should reach Exited state, not FailedToStart.
+        await rns.WaitForResourceAsync(containerResourceName, KnownResourceStates.Exited, token).DefaultTimeout(TestConstants.ExtraLongTimeoutTimeSpan);
+
+        await startTask.DefaultTimeout(TestConstants.ExtraLongTimeoutTimeSpan);
+        await app.StopAsync(token).DefaultTimeout(TestConstants.ExtraLongTimeoutTimeSpan);
+    }
+
     private static async Task EnsureLogLines(Stream stream, CancellationToken ct, long nlines, Func<long, bool>? validateLineNumber = default)
     {
         using var reader = new StreamReader(stream);
@@ -1969,5 +2150,24 @@ public class DistributedApplicationTests
         testProgram.AppBuilder.WithTestAndResourceLogging(_testOutputHelper);
 
         return testProgram;
+    }
+
+    private static ActivityListener CreateActivityListener(string sourceName, Action<Activity> activityStopped)
+    {
+        var listener = new ActivityListener
+        {
+            ShouldListenTo = source => source.Name == sourceName,
+            Sample = (ref ActivityCreationOptions<ActivityContext> _) => ActivitySamplingResult.AllDataAndRecorded,
+            ActivityStopped = activityStopped
+        };
+        ActivitySource.AddActivityListener(listener);
+        return listener;
+    }
+
+    private static IConfiguration CreateConfiguration(params (string Key, string? Value)[] values)
+    {
+        return new ConfigurationBuilder()
+            .AddInMemoryCollection(values.Select(value => new KeyValuePair<string, string?>(value.Key, value.Value)))
+            .Build();
     }
 }

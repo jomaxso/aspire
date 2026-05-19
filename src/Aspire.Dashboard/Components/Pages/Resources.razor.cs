@@ -113,7 +113,7 @@ public partial class Resources : ComponentBase, IComponentWithTelemetry, IAsyncD
 
     private ResourceViewModel? SelectedResource { get; set; }
 
-    private readonly CancellationTokenSource _watchTaskCancellationTokenSource = new();
+    private readonly CancellationTokenSource _cts = new();
     private readonly ConcurrentDictionary<string, ResourceViewModel> _resourceByName = new(StringComparers.ResourceName);
     private readonly HashSet<string> _collapsedResourceNames = new(StringComparers.ResourceName);
     private readonly TaskCompletionSource _loadingTcs = new(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -292,7 +292,7 @@ public partial class Resources : ComponentBase, IComponentWithTelemetry, IAsyncD
 
         async Task SubscribeResourcesAsync()
         {
-            var (snapshot, subscription) = await DashboardClient.SubscribeResourcesAsync(_watchTaskCancellationTokenSource.Token);
+            var (snapshot, subscription) = await DashboardClient.SubscribeResourcesAsync(_cts.Token);
 
             // Apply snapshot.
             foreach (var resource in snapshot)
@@ -307,7 +307,7 @@ public partial class Resources : ComponentBase, IComponentWithTelemetry, IAsyncD
             // Listen for updates and apply.
             _resourceSubscriptionTask = Task.Run(async () =>
             {
-                await foreach (var changes in subscription.WithCancellation(_watchTaskCancellationTokenSource.Token).ConfigureAwait(false))
+                await foreach (var changes in subscription.WithCancellation(_cts.Token).ConfigureAwait(false))
                 {
                     var selectedResourceHasChanged = false;
 
@@ -607,7 +607,9 @@ public partial class Resources : ComponentBase, IComponentWithTelemetry, IAsyncD
                 Logger.LogDebug("Can't navigate to {ResourceName} from URL. Resource not found.", ResourceName);
             }
 
-            // Navigate to remove ?resource=xxx in the URL.
+            // Navigate to remove ?resource=xxx in the URL. A small delay is required here, otherwise the page rendering breaks.
+            await Task.Delay(200, _cts.Token);
+
             NavigationManager.NavigateTo(DashboardUrls.ResourcesUrl(), new NavigationOptions { ReplaceHistoryEntry = true });
         }
 
@@ -643,7 +645,7 @@ public partial class Resources : ComponentBase, IComponentWithTelemetry, IAsyncD
             ResourceMenuBuilder.AddMenuItems(
                 _contextMenuItems,
                 resource,
-                GetResourceName,
+                _resourceByName,
                 EventCallback.Factory.Create(this, () => ShowResourceDetailsAsync(resource, buttonId: null)),
                 EventCallback.Factory.Create<CommandViewModel>(this, (command) => ExecuteResourceCommandAsync(resource, command)),
                 (resource, command) => DashboardCommandExecutor.IsExecuting(resource.Name, command.Name),
@@ -734,7 +736,7 @@ public partial class Resources : ComponentBase, IComponentWithTelemetry, IAsyncD
         _elementIdBeforeDetailsViewOpened = null;
     }
 
-    private string GetResourceName(ResourceViewModel resource) => ResourceViewModel.GetResourceName(resource, _resourceByName, _showHiddenResources);
+    private string GetResourceName(ResourceViewModel resource) => ResourceViewModel.GetResourceName(resource, _resourceByName);
 
     private bool HasMultipleReplicas(ResourceViewModel resource)
     {
@@ -985,7 +987,7 @@ public partial class Resources : ComponentBase, IComponentWithTelemetry, IAsyncD
         _aiContext?.Dispose();
 
         _resourcesInteropReference?.Dispose();
-        _watchTaskCancellationTokenSource.Cancel();
+        _cts.Cancel();
         _logsSubscription?.Dispose();
         TelemetryContext.Dispose();
         await JSInteropHelpers.SafeDisposeAsync(_jsModule);

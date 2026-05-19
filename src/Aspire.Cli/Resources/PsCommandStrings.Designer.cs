@@ -57,21 +57,15 @@ namespace Aspire.Cli.Resources {
             }
         }
 
-        public static string ScanningForRunningAppHosts {
-            get {
-                return ResourceManager.GetString("ScanningForRunningAppHosts", resourceCulture);
-            }
-        }
-
-        public static string NoRunningAppHostsFound {
-            get {
-                return ResourceManager.GetString("NoRunningAppHostsFound", resourceCulture);
-            }
-        }
-
         public static string HeaderPath {
             get {
                 return ResourceManager.GetString("HeaderPath", resourceCulture);
+            }
+        }
+
+        public static string HeaderSdk {
+            get {
+                return ResourceManager.GetString("HeaderSdk", resourceCulture);
             }
         }
 
@@ -93,9 +87,21 @@ namespace Aspire.Cli.Resources {
             }
         }
 
+        public static string HeaderCliLog {
+            get {
+                return ResourceManager.GetString("HeaderCliLog", resourceCulture);
+            }
+        }
+
         public static string UnknownPath {
             get {
                 return ResourceManager.GetString("UnknownPath", resourceCulture);
+            }
+        }
+
+        public static string ResourcesOptionDescription {
+            get {
+                return ResourceManager.GetString("ResourcesOptionDescription", resourceCulture);
             }
         }
     }

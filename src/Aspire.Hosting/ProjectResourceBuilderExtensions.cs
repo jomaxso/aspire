@@ -62,7 +62,9 @@ public static class ProjectResourceBuilderExtensions
     /// builder.Build().Run();
     /// </code>
     /// </example>
+    /// <remarks>This method is not available in polyglot app hosts. Use the overload with projectPath instead.</remarks>
     /// </remarks>
+    [AspireExportIgnore(Reason = "Uses IProjectMetadata generic constraint which is a .NET-specific type.")]
     public static IResourceBuilder<ProjectResource> AddProject<TProject>(this IDistributedApplicationBuilder builder, [ResourceName] string name) where TProject : IProjectMetadata, new()
     {
         ArgumentNullException.ThrowIfNull(builder);
@@ -96,6 +98,7 @@ public static class ProjectResourceBuilderExtensions
     /// </code>
     /// </example>
     /// </remarks>
+    [AspireExportIgnore(Reason = "Polyglot app hosts use the internal addProject dispatcher export.")]
     public static IResourceBuilder<ProjectResource> AddProject(this IDistributedApplicationBuilder builder, [ResourceName] string name, string projectPath)
     {
         ArgumentNullException.ThrowIfNull(builder);
@@ -103,6 +106,26 @@ public static class ProjectResourceBuilderExtensions
         ArgumentNullException.ThrowIfNull(projectPath);
 
         return builder.AddProject(name, projectPath, _ => { });
+    }
+
+    [AspireExport("addProject", Description = "Adds a .NET project resource")]
+    internal static IResourceBuilder<ProjectResource> AddProjectForPolyglot(
+        this IDistributedApplicationBuilder builder,
+        [ResourceName] string name,
+        string projectPath,
+        [AspireUnion(typeof(string), typeof(ProjectResourceOptions))] object? launchProfileOrOptions = null)
+    {
+        ArgumentNullException.ThrowIfNull(builder);
+        ArgumentException.ThrowIfNullOrEmpty(name);
+        ArgumentNullException.ThrowIfNull(projectPath);
+
+        return launchProfileOrOptions switch
+        {
+            null => builder.AddProject(name, projectPath),
+            string launchProfileName => builder.AddProject(name, projectPath, launchProfileName),
+            ProjectResourceOptions options => builder.AddProject(name, projectPath, configure => ApplyProjectResourceOptions(configure, options)),
+            _ => throw new ArgumentException("Launch profile must be a string or ProjectResourceOptions.", nameof(launchProfileOrOptions))
+        };
     }
 
     /// <summary>
@@ -142,7 +165,9 @@ public static class ProjectResourceBuilderExtensions
     /// builder.Build().Run();
     /// </code>
     /// </example>
+    /// <remarks>This method is not available in polyglot app hosts. Use the overload with projectPath instead.</remarks>
     /// </remarks>
+    [AspireExportIgnore(Reason = "Uses IProjectMetadata generic constraint which is a .NET-specific type.")]
     public static IResourceBuilder<ProjectResource> AddProject<TProject>(this IDistributedApplicationBuilder builder, [ResourceName] string name, string? launchProfileName) where TProject : IProjectMetadata, new()
     {
         ArgumentNullException.ThrowIfNull(builder);
@@ -181,7 +206,7 @@ public static class ProjectResourceBuilderExtensions
     /// </code>
     /// </example>
     /// </remarks>
-    [AspireExport("addProject", Description = "Adds a .NET project resource")]
+    [AspireExportIgnore(Reason = "Polyglot app hosts use the internal addProject dispatcher export.")]
     public static IResourceBuilder<ProjectResource> AddProject(this IDistributedApplicationBuilder builder, [ResourceName] string name, string projectPath, string? launchProfileName)
     {
         ArgumentNullException.ThrowIfNull(builder);
@@ -230,7 +255,9 @@ public static class ProjectResourceBuilderExtensions
     /// builder.Build().Run();
     /// </code>
     /// </example>
+    /// <remarks>This method is not available in polyglot app hosts. Use the overload with projectPath instead.</remarks>
     /// </remarks>
+    [AspireExportIgnore(Reason = "Uses IProjectMetadata generic constraint which is a .NET-specific type.")]
     public static IResourceBuilder<ProjectResource> AddProject<TProject>(this IDistributedApplicationBuilder builder, [ResourceName] string name, Action<ProjectResourceOptions> configure) where TProject : IProjectMetadata, new()
     {
         ArgumentNullException.ThrowIfNull(builder);
@@ -274,6 +301,7 @@ public static class ProjectResourceBuilderExtensions
     /// </code>
     /// </example>
     /// </remarks>
+    [AspireExportIgnore(Reason = "Polyglot app hosts use the internal addProject dispatcher export.")]
     public static IResourceBuilder<ProjectResource> AddProject(this IDistributedApplicationBuilder builder, [ResourceName] string name, string projectPath, Action<ProjectResourceOptions> configure)
     {
         ArgumentNullException.ThrowIfNull(builder);
@@ -319,6 +347,7 @@ public static class ProjectResourceBuilderExtensions
     /// </example>
     /// </remarks>
     [Experimental("ASPIRECSHARPAPPS001", UrlFormat = "https://aka.ms/aspire/diagnostics/{0}")]
+    [AspireExportIgnore(Reason = "Polyglot app hosts use the internal addCSharpApp dispatcher export.")]
     public static IResourceBuilder<ProjectResource> AddCSharpApp(this IDistributedApplicationBuilder builder, string name, string path)
     {
         ArgumentNullException.ThrowIfNull(builder);
@@ -326,6 +355,19 @@ public static class ProjectResourceBuilderExtensions
         ArgumentNullException.ThrowIfNull(path);
 
         return builder.AddCSharpApp(name, path, _ => { });
+    }
+
+    [Experimental("ASPIRECSHARPAPPS001", UrlFormat = "https://aka.ms/aspire/diagnostics/{0}")]
+    [AspireExport("addCSharpApp", Description = "Adds a C# application resource")]
+    internal static IResourceBuilder<CSharpAppResource> AddCSharpAppForPolyglot(
+        this IDistributedApplicationBuilder builder,
+        [ResourceName] string name,
+        string path,
+        ProjectResourceOptions? options = null)
+    {
+        return options is null
+            ? builder.AddCSharpApp(name, path, _ => { })
+            : builder.AddCSharpApp(name, path, configure => ApplyProjectResourceOptions(configure, options));
     }
 
     /// <summary>
@@ -354,6 +396,7 @@ public static class ProjectResourceBuilderExtensions
     /// </example>
     /// </remarks>
     [Experimental("ASPIRECSHARPAPPS001", UrlFormat = "https://aka.ms/aspire/diagnostics/{0}")]
+    [AspireExportIgnore(Reason = "Polyglot app hosts use the internal addCSharpApp dispatcher export.")]
     public static IResourceBuilder<CSharpAppResource> AddCSharpApp(this IDistributedApplicationBuilder builder, [ResourceName] string name, string path, Action<ProjectResourceOptions> configure)
     {
         ArgumentNullException.ThrowIfNull(builder);
@@ -404,20 +447,30 @@ public static class ProjectResourceBuilderExtensions
         return resource;
     }
 
+    private static void ApplyProjectResourceOptions(ProjectResourceOptions target, ProjectResourceOptions source)
+    {
+        ArgumentNullException.ThrowIfNull(target);
+        ArgumentNullException.ThrowIfNull(source);
+
+        target.LaunchProfileName = source.LaunchProfileName;
+        target.ExcludeLaunchProfile = source.ExcludeLaunchProfile;
+        target.ExcludeKestrelEndpoints = source.ExcludeKestrelEndpoints;
+    }
+
     private static IResourceBuilder<TProjectResource> WithProjectDefaults<TProjectResource>(this IResourceBuilder<TProjectResource> builder, ProjectResourceOptions options)
         where TProjectResource : ProjectResource
     {
         // .NET SDK has experimental support for retries. Enable with env var.
         // https://github.com/open-telemetry/opentelemetry-dotnet/pull/5495
         // Remove once retry feature in opentelemetry-dotnet is enabled by default.
-        builder.WithEnvironment("OTEL_DOTNET_EXPERIMENTAL_OTLP_RETRY", "in_memory");
+        builder.WithEnvironment(KnownOtelConfigNames.DotnetExperimentalOtlpRetry, "in_memory");
 
         // OTEL settings that are used to improve local development experience.
         if (builder.ApplicationBuilder.ExecutionContext.IsRunMode && builder.ApplicationBuilder.Environment.IsDevelopment())
         {
             // Disable URL query redaction, e.g. ?myvalue=Redacted
-            builder.WithEnvironment("OTEL_DOTNET_EXPERIMENTAL_ASPNETCORE_DISABLE_URL_QUERY_REDACTION", "true");
-            builder.WithEnvironment("OTEL_DOTNET_EXPERIMENTAL_HTTPCLIENT_DISABLE_URL_QUERY_REDACTION", "true");
+            builder.WithEnvironment(KnownOtelConfigNames.DotnetExperimentalAspNetCoreDisableUrlQueryRedaction, "true");
+            builder.WithEnvironment(KnownOtelConfigNames.DotnetExperimentalHttpClientDisableUrlQueryRedaction, "true");
         }
 
         builder.WithOtlpExporter();
@@ -444,6 +497,12 @@ public static class ProjectResourceBuilderExtensions
         });
 
         var projectResource = builder.Resource;
+
+        // In run mode, create a hidden rebuilder resource for this project.
+        if (builder.ApplicationBuilder.ExecutionContext.IsRunMode)
+        {
+            AddRebuilderResource(builder, projectResource);
+        }
 
         if (builder.ApplicationBuilder.ExecutionContext.IsPublishMode)
         {
@@ -731,7 +790,7 @@ public static class ProjectResourceBuilderExtensions
     /// </code>
     /// </example>
     /// </remarks>
-    [AspireExport("withReplicas", Description = "Sets the number of replicas")]
+    [AspireExport(Description = "Sets the number of replicas")]
     public static IResourceBuilder<ProjectResource> WithReplicas(this IResourceBuilder<ProjectResource> builder, int replicas)
     {
         ArgumentNullException.ThrowIfNull(builder);
@@ -766,6 +825,7 @@ public static class ProjectResourceBuilderExtensions
     /// </code>
     /// </example>
     /// </remarks>
+    [AspireExport(Description = "Disables forwarded headers for the project")]
     public static IResourceBuilder<ProjectResource> DisableForwardedHeaders(this IResourceBuilder<ProjectResource> builder)
     {
         ArgumentNullException.ThrowIfNull(builder);
@@ -781,6 +841,8 @@ public static class ProjectResourceBuilderExtensions
     /// <param name="builder">The project resource builder.</param>
     /// <param name="filter">The filter callback that returns true if and only if the endpoint should be included.</param>
     /// <returns>A reference to the <see cref="IResourceBuilder{T}"/>.</returns>
+    /// <remarks>This method is not available in polyglot app hosts.</remarks>
+    [AspireExportIgnore(Reason = "Uses Func<EndpointAnnotation, bool> which is not ATS-compatible.")]
     public static IResourceBuilder<ProjectResource> WithEndpointsInEnvironment(
         this IResourceBuilder<ProjectResource> builder, Func<EndpointAnnotation, bool> filter)
     {
@@ -806,6 +868,7 @@ public static class ProjectResourceBuilderExtensions
     /// <param name="builder">Resource builder</param>
     /// <param name="configure">Optional action to configure the container resource</param>
     /// <returns>A reference to the <see cref="IResourceBuilder{T}"/>.</returns>
+    [AspireExport("publishProjectAsDockerFileWithConfigure", MethodName = "publishAsDockerFile", Description = "Publishes a project as a Docker file with optional container configuration", RunSyncOnBackgroundThread = true)]
     public static IResourceBuilder<T> PublishAsDockerFile<T>(this IResourceBuilder<T> builder, Action<IResourceBuilder<ContainerResource>>? configure = null)
         where T : ProjectResource
     {
@@ -884,6 +947,37 @@ public static class ProjectResourceBuilderExtensions
         configBuilder.AddJsonFile(appNameSettingsPath, optional: true);
         configBuilder.AddJsonFile(appNameSettingsEnvironmentPath, optional: true);
         return configBuilder.Build();
+    }
+
+    /// <summary>
+    /// Creates a hidden rebuilder resource that runs 'dotnet build' on demand via the rebuild command.
+    /// </summary>
+    private static void AddRebuilderResource<TProjectResource>(IResourceBuilder<TProjectResource> builder, TProjectResource projectResource)
+        where TProjectResource : ProjectResource
+    {
+        var projectMetadata = projectResource.Annotations.OfType<IProjectMetadata>().SingleOrDefault();
+        if (projectMetadata is null || projectMetadata.IsFileBasedApp)
+        {
+            return;
+        }
+
+        var rebuilderName = $"{projectResource.Name}-rebuilder";
+        var rebuilder = new ProjectRebuilderResource(rebuilderName, projectResource, projectMetadata.ProjectPath);
+        rebuilder.Annotations.Add(NameValidationPolicyAnnotation.None);
+        var rebuilderBuilder = builder.ApplicationBuilder.AddResource(rebuilder);
+
+        rebuilderBuilder
+            .WithArgs("build", projectMetadata.ProjectPath)
+            .WithAnnotation(new ExplicitStartupAnnotation())
+            .WithAnnotation(new ExcludeLifecycleCommandsAnnotation())
+            .ExcludeFromManifest()
+            .WithInitialState(new CustomResourceSnapshot
+            {
+                ResourceType = "Executable",
+                State = KnownResourceStates.NotStarted,
+                Properties = [],
+                IsHidden = true,
+            });
     }
 
     private static void SetAspNetCoreUrls(this IResourceBuilder<ProjectResource> builder)

@@ -2,6 +2,7 @@
 // The .NET Foundation licenses this file to you under the MIT license.
 
 #pragma warning disable ASPIRECOMPUTE003 // Type is for evaluation purposes only and is subject to change or removal in future updates.
+#pragma warning disable ASPIREAZURE003 // Type is for evaluation purposes only and is subject to change or removal in future updates.
 
 using Aspire.Hosting.ApplicationModel;
 using Aspire.Hosting.Azure.AppContainers;
@@ -132,5 +133,62 @@ public class AzureContainerAppEnvironmentExtensionsTests
         var exception = Assert.Throws<InvalidOperationException>(() => containerAppEnvironment.Resource.ContainerRegistry);
         Assert.Contains("not an Azure Container Registry", exception.Message);
         Assert.Contains("env", exception.Message);
+    }
+
+    [Fact]
+    public async Task WithDelegatedSubnet_ConfiguresVnetConfiguration()
+    {
+        using var builder = TestDistributedApplicationBuilder.Create(DistributedApplicationOperation.Publish);
+
+        var vnet = builder.AddAzureVirtualNetwork("myvnet");
+        var subnet = vnet.AddSubnet("container-apps-subnet", "10.0.0.0/23");
+
+        var containerAppEnvironment = builder.AddAzureContainerAppEnvironment("env")
+            .WithDelegatedSubnet(subnet);
+
+        var (_, envBicep) = await AzureManifestUtils.GetManifestWithBicep(containerAppEnvironment.Resource);
+        var (_, vnetBicep) = await AzureManifestUtils.GetManifestWithBicep(vnet.Resource);
+
+        await Verify(envBicep, extension: "bicep")
+            .AppendContentAsFile(vnetBicep, "bicep", "vnet");
+    }
+
+    [Fact]
+    public async Task WithAzureContainerRegistry_PublishSucceeds_WhenDefaultRegistryIsRedundant()
+    {
+        // Regression test for the publish-time error:
+        //   "Step 'push-prereq' depends on unknown step 'login-to-acr-env-acr'"
+        // which occurred when an explicit container registry was supplied to an
+        // AzureContainerAppEnvironment. The env's prepare step removes the now-unused
+        // default '{env}-acr' registry from the model during BeforeStart. Without
+        // isolating the BeforeStart pipeline-resolve from the singleton pipeline,
+        // that resolve would have appended the default registry's login step name
+        // to the built-in 'push-prereq' step's DependsOnSteps list, leaving a stale
+        // dependency edge that caused the publish-time ResolveStepsAsync to fail.
+        using var tempDir = new TestTempDirectory();
+
+        var builder = TestDistributedApplicationBuilder.Create(DistributedApplicationOperation.Publish, tempDir.Path);
+
+        var acr = builder.AddAzureContainerRegistry("acr");
+        builder.AddAzureContainerAppEnvironment("env")
+            .WithAzureContainerRegistry(acr);
+
+        builder.AddContainer("api", "myimage");
+
+        using var app = builder.Build();
+
+        // Publishing will stop the app when it is done.
+        await app.RunAsync();
+
+        var mainBicepPath = Path.Combine(tempDir.Path, "main.bicep");
+        Assert.True(File.Exists(mainBicepPath), $"Expected publish to produce '{mainBicepPath}'.");
+        var mainBicep = await File.ReadAllTextAsync(mainBicepPath);
+
+        var envBicepPath = Path.Combine(tempDir.Path, "env", "env.bicep");
+        Assert.True(File.Exists(envBicepPath), $"Expected publish to produce '{envBicepPath}'.");
+        var envBicep = await File.ReadAllTextAsync(envBicepPath);
+
+        await Verify(mainBicep, "bicep")
+            .AppendContentAsFile(envBicep, "bicep");
     }
 }

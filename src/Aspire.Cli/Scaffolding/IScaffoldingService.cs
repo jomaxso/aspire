@@ -11,10 +11,14 @@ namespace Aspire.Cli.Scaffolding;
 /// <param name="Language">The language to scaffold.</param>
 /// <param name="TargetDirectory">The directory to scaffold into.</param>
 /// <param name="ProjectName">Optional project name.</param>
+/// <param name="SdkVersion">Optional Aspire SDK version to use for scaffolding.</param>
+/// <param name="Channel">Optional Aspire channel to use for scaffolding.</param>
 internal record ScaffoldContext(
     LanguageInfo Language,
     DirectoryInfo TargetDirectory,
-    string? ProjectName = null);
+    string? ProjectName = null,
+    string? SdkVersion = null,
+    string? Channel = null);
 
 /// <summary>
 /// Service for scaffolding new AppHost projects.
@@ -26,5 +30,6 @@ internal interface IScaffoldingService
     /// </summary>
     /// <param name="context">The scaffolding context.</param>
     /// <param name="cancellationToken">Cancellation token.</param>
-    Task ScaffoldAsync(ScaffoldContext context, CancellationToken cancellationToken);
+    /// <returns><see langword="true"/> when scaffolding succeeds; otherwise, <see langword="false"/>.</returns>
+    Task<bool> ScaffoldAsync(ScaffoldContext context, CancellationToken cancellationToken);
 }

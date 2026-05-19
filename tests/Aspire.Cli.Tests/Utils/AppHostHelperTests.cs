@@ -1,6 +1,8 @@
 // Licensed to the .NET Foundation under one or more agreements.
 // The .NET Foundation licenses this file to you under the MIT license.
 
+using Aspire.Cli.Tests.Telemetry;
+using Aspire.Cli.Tests.TestServices;
 using Aspire.Cli.Utils;
 
 namespace Aspire.Cli.Tests.Utils;
@@ -97,11 +99,22 @@ public class AppHostHelperTests(ITestOutputHelper outputHelper)
     [Fact]
     public void ExtractHashFromSocketPath_ExtractsHashFromNewFormat()
     {
-        // New format: auxi.sock.{hash}.{pid}
-        var socketPath = "/home/user/.aspire/cli/backchannels/auxi.sock.abc123def4567890.12345";
+        // Current format: auxi.sock.{hash}.{instanceHash}.{pid}
+        var socketPath = "/home/user/.aspire/cli/backchannels/auxi.sock.abc123def4567890.a1b2c3d4e5f6.12345";
         
         var hash = AppHostHelper.ExtractHashFromSocketPath(socketPath);
         
+        Assert.Equal("abc123def4567890", hash);
+    }
+
+    [Fact]
+    public void ExtractHashFromSocketPath_ExtractsHashFromPreviousFormat()
+    {
+        // Previous format: auxi.sock.{hash}.{pid}
+        var socketPath = "/home/user/.aspire/cli/backchannels/auxi.sock.abc123def4567890.12345";
+
+        var hash = AppHostHelper.ExtractHashFromSocketPath(socketPath);
+
         Assert.Equal("abc123def4567890", hash);
     }
 
@@ -140,11 +153,22 @@ public class AppHostHelperTests(ITestOutputHelper outputHelper)
     [Fact]
     public void ExtractPidFromSocketPath_ExtractsPidFromNewFormat()
     {
-        // New format: auxi.sock.{hash}.{pid}
-        var socketPath = "/home/user/.aspire/cli/backchannels/auxi.sock.abc123def4567890.12345";
+        // Current format: auxi.sock.{hash}.{instanceHash}.{pid}
+        var socketPath = "/home/user/.aspire/cli/backchannels/auxi.sock.abc123def4567890.a1b2c3d4e5f6.12345";
         
         var pid = AppHostHelper.ExtractPidFromSocketPath(socketPath);
         
+        Assert.Equal(12345, pid);
+    }
+
+    [Fact]
+    public void ExtractPidFromSocketPath_ExtractsPidFromPreviousFormat()
+    {
+        // Previous format: auxi.sock.{hash}.{pid}
+        var socketPath = "/home/user/.aspire/cli/backchannels/auxi.sock.abc123def4567890.12345";
+
+        var pid = AppHostHelper.ExtractPidFromSocketPath(socketPath);
+
         Assert.Equal(12345, pid);
     }
 
@@ -215,8 +239,8 @@ public class AppHostHelperTests(ITestOutputHelper outputHelper)
         var prefix = AppHostHelper.ComputeAuxiliarySocketPrefix(appHostPath, workspace.WorkspaceRoot.FullName);
         var hash = Path.GetFileName(prefix)["auxi.sock.".Length..];
         
-        // Create matching socket files (new format with PID)
-        var socket1 = Path.Combine(backchannelsDir, $"auxi.sock.{hash}.12345");
+        // Create matching socket files in both current and previous formats.
+        var socket1 = Path.Combine(backchannelsDir, $"auxi.sock.{hash}.a1b2c3d4e5f6.12345");
         var socket2 = Path.Combine(backchannelsDir, $"auxi.sock.{hash}.67890");
         File.WriteAllText(socket1, "");
         File.WriteAllText(socket2, "");
@@ -337,5 +361,131 @@ public class AppHostHelperTests(ITestOutputHelper outputHelper)
         Assert.True(File.Exists(oldFormatSocket), "Old format socket should still exist (can't detect orphan)");
         Assert.False(File.Exists(orphanedSocket), "Orphaned socket should be deleted");
         Assert.True(File.Exists(liveSocket), "Live socket should still exist");
+    }
+    [Theory]
+    [InlineData("10.0.0", true)]
+    [InlineData("9.2.0", true)]
+    [InlineData("9.3.0", true)]
+    [InlineData("13.0.0-preview.1", true)]
+    [InlineData("9.1.0", false)]
+    [InlineData("8.0.0", false)]
+    [InlineData("1.0.0", false)]
+    public async Task CheckAppHostCompatibility_VersionCheck(string aspireVersion, bool expectedCompatible)
+    {
+        var runner = new TestDotNetCliRunner
+        {
+            GetAppHostInformationAsyncCallback = (_, _, _) => (0, true, aspireVersion)
+        };
+        var interactionService = new TestInteractionService();
+        var telemetry = TestTelemetryHelper.CreateInitializedTelemetry();
+        var projectFile = new FileInfo(Path.Combine(Path.GetTempPath(), "test.csproj"));
+        var workingDirectory = new DirectoryInfo(Path.GetTempPath());
+
+        var (isCompatible, _, returnedVersion) = await AppHostHelper.CheckAppHostCompatibilityAsync(
+            runner, interactionService, projectFile, telemetry, workingDirectory, "test.log", CancellationToken.None);
+
+        Assert.Equal(expectedCompatible, isCompatible);
+        Assert.Equal(aspireVersion, returnedVersion);
+    }
+
+    [Fact]
+    public void ComputeLegacyHash_WhenUppercaseDrivePathOnWindows_ReturnsLowercaseDriveLegacyHash()
+    {
+        Assert.SkipWhen(!OperatingSystem.IsWindows(),
+            "Drive-letter legacy fallback behavior only applies on Windows.");
+
+        var upperDrivePath = @"C:\Path\To\MyApp.AppHost.csproj";
+        var lowerDrivePath = @"c:\Path\To\MyApp.AppHost.csproj";
+
+        var upperLegacyHash = AppHostHelper.ComputeLegacyHash(upperDrivePath);
+        var lowerLegacyHash = AppHostHelper.ComputeLegacyHash(lowerDrivePath);
+
+        Assert.NotNull(upperLegacyHash);
+        Assert.NotNull(lowerLegacyHash);
+        Assert.Equal(lowerLegacyHash, upperLegacyHash);
+
+        var currentPrefix = AppHostHelper.ComputeAuxiliarySocketPrefix(upperDrivePath, Path.GetTempPath());
+        var currentHash = Path.GetFileName(currentPrefix)["auxi.sock.".Length..];
+        Assert.NotEqual(currentHash, upperLegacyHash);
+    }
+
+    [Fact]
+    public void ComputeLegacyHash_ReturnsNullOnNonWindowsWhenPathUnchanged()
+    {
+        Assert.SkipWhen(OperatingSystem.IsWindows(),
+            "Non-Windows behavior is validated by this test.");
+
+        var appHostPath = "/path/to/MyApp.AppHost.csproj";
+        var legacyHash = AppHostHelper.ComputeLegacyHash(appHostPath);
+
+        Assert.Null(legacyHash);
+    }
+
+    [Fact]
+    public void FindMatchingSockets_FindsSocketsCreatedWithDifferentDriveLetterCasing()
+    {
+        Assert.SkipWhen(!OperatingSystem.IsWindows(),
+            "Drive letter normalization only applies on Windows.");
+
+        using var workspace = TemporaryWorkspace.Create(outputHelper);
+        var backchannelsDir = Path.Combine(workspace.WorkspaceRoot.FullName, ".aspire", "cli", "backchannels");
+        Directory.CreateDirectory(backchannelsDir);
+
+        // Simulate the real-world mismatch: FileInfo.FullName yields an uppercase drive letter
+        // (e.g. "C:\...") while MSBuild metadata may yield a lowercase one (e.g. "c:\...").
+        // Only the drive letter casing differs; the rest of the path is identical.
+        var upperDrivePath = @"C:\Development\MyApp\MyApp.AppHost.csproj";
+        var lowerDrivePath = @"c:\Development\MyApp\MyApp.AppHost.csproj";
+
+        // Both should produce the same hash after drive-letter normalization.
+        var upperPrefix = AppHostHelper.ComputeAuxiliarySocketPrefix(upperDrivePath, workspace.WorkspaceRoot.FullName);
+        var lowerPrefix = AppHostHelper.ComputeAuxiliarySocketPrefix(lowerDrivePath, workspace.WorkspaceRoot.FullName);
+        Assert.Equal(upperPrefix, lowerPrefix);
+
+        var hash = Path.GetFileName(upperPrefix)["auxi.sock.".Length..];
+
+        // Create a socket file using the normalized hash (simulates a new AppHost)
+        var socket = Path.Combine(backchannelsDir, $"auxi.sock.{hash}.a1b2c3d4e5f6.12345");
+        File.WriteAllText(socket, "");
+
+        // Both path variants should find the socket
+        var fromUpper = AppHostHelper.FindMatchingSockets(upperDrivePath, workspace.WorkspaceRoot.FullName);
+        var fromLower = AppHostHelper.FindMatchingSockets(lowerDrivePath, workspace.WorkspaceRoot.FullName);
+
+        Assert.Single(fromUpper);
+        Assert.Single(fromLower);
+        Assert.Contains(socket, fromUpper);
+        Assert.Contains(socket, fromLower);
+    }
+
+    [Fact]
+    public void FindMatchingSockets_LegacyHashFindsSocketsFromOlderAppHost()
+    {
+        Assert.SkipWhen(!OperatingSystem.IsWindows(),
+            "Legacy hash divergence only occurs on Windows where drive-letter casing is normalized.");
+
+        using var workspace = TemporaryWorkspace.Create(outputHelper);
+        var backchannelsDir = Path.Combine(workspace.WorkspaceRoot.FullName, ".aspire", "cli", "backchannels");
+        Directory.CreateDirectory(backchannelsDir);
+
+        // A path with a lowercase drive letter produces a legacy hash that differs from the
+        // normalized hash (which has an uppercase drive letter).
+        var appHostPath = @"c:\Development\MyApp\MyApp.AppHost.csproj";
+        var legacyHash = AppHostHelper.ComputeLegacyHash(appHostPath);
+        Assert.NotNull(legacyHash);
+
+        // Create a socket using the legacy (pre-normalization) hash, as an older AppHost would
+        var legacySocket = Path.Combine(backchannelsDir, $"auxi.sock.{legacyHash}.a1b2c3d4e5f6.99999");
+        File.WriteAllText(legacySocket, "");
+
+        // The current normalized hash differs from the legacy hash
+        var currentPrefix = AppHostHelper.ComputeAuxiliarySocketPrefix(appHostPath, workspace.WorkspaceRoot.FullName);
+        var currentHash = Path.GetFileName(currentPrefix)["auxi.sock.".Length..];
+        Assert.NotEqual(currentHash, legacyHash);
+
+        // FindMatchingSockets should still find the legacy socket via fallback
+        var found = AppHostHelper.FindMatchingSockets(appHostPath, workspace.WorkspaceRoot.FullName);
+        Assert.Single(found);
+        Assert.Contains(legacySocket, found);
     }
 }

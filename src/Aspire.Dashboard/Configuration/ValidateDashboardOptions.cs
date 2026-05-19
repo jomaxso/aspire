@@ -98,22 +98,22 @@ public sealed class ValidateDashboardOptions : IValidateOptions<DashboardOptions
             }
         }
 
-        if (!options.Mcp.TryParseOptions(out var mcpParseErrorMessage))
+        if (!options.Api.TryParseOptions(out var apiParseErrorMessage))
         {
-            errorMessages.Add(mcpParseErrorMessage);
+            errorMessages.Add(apiParseErrorMessage);
         }
 
-        switch (options.Mcp.AuthMode)
-        {
-            case McpAuthMode.Unsecured:
-                break;
-            case McpAuthMode.ApiKey:
-                if (string.IsNullOrEmpty(options.Mcp.PrimaryApiKey))
-                {
-                    errorMessages.Add($"PrimaryApiKey is required when MCP authentication mode is API key. Specify a {DashboardConfigNames.DashboardMcpPrimaryApiKeyName.ConfigKey} value.");
-                }
-                break;
+        // Validate API auth configuration
+        var effectiveApiAuthMode = options.Api.AuthMode;
 
+        if (effectiveApiAuthMode is ApiAuthMode.ApiKey)
+        {
+            // PrimaryApiKey should always be present when AuthMode is ApiKey because
+            // PostConfigureDashboardOptions generates a key when one isn't specified.
+            if (string.IsNullOrEmpty(options.Api.PrimaryApiKey))
+            {
+                errorMessages.Add($"PrimaryApiKey is required when API authentication mode is ApiKey. Specify Dashboard:Api:PrimaryApiKey.");
+            }
         }
 
         if (!options.ResourceServiceClient.TryParseOptions(out var resourceServiceClientParseErrorMessage))

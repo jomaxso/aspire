@@ -8,7 +8,6 @@ using Aspire.Hosting.ApplicationModel.Docker;
 using Aspire.Hosting.Pipelines;
 using Aspire.Hosting.Python;
 using Microsoft.Extensions.DependencyInjection;
-using Microsoft.Extensions.DependencyInjection.Extensions;
 using Microsoft.Extensions.Logging;
 
 #pragma warning disable ASPIREDOCKERFILEBUILDER001 // Type is for evaluation purposes only and is subject to change or removal in future updates. Suppress this diagnostic to proceed.
@@ -63,6 +62,7 @@ public static class PythonAppResourceBuilderExtensions
     /// </code>
     /// </example>
     [OverloadResolutionPriority(1)]
+    [AspireExport(Description = "Adds a Python script application resource")]
     public static IResourceBuilder<PythonAppResource> AddPythonApp(
         this IDistributedApplicationBuilder builder, [ResourceName] string name, string appDirectory, string scriptPath)
         => AddPythonAppCore(builder, name, appDirectory, EntrypointType.Script, scriptPath, DefaultVirtualEnvFolder)
@@ -98,6 +98,7 @@ public static class PythonAppResourceBuilderExtensions
     /// builder.Build().Run();
     /// </code>
     /// </example>
+    [AspireExport(Description = "Adds a Python module application resource")]
     public static IResourceBuilder<PythonAppResource> AddPythonModule(
         this IDistributedApplicationBuilder builder, [ResourceName] string name, string appDirectory, string moduleName)
         => AddPythonAppCore(builder, name, appDirectory, EntrypointType.Module, moduleName, DefaultVirtualEnvFolder)
@@ -136,6 +137,7 @@ public static class PythonAppResourceBuilderExtensions
     /// builder.Build().Run();
     /// </code>
     /// </example>
+    [AspireExport(Description = "Adds a Python executable application resource")]
     public static IResourceBuilder<PythonAppResource> AddPythonExecutable(
         this IDistributedApplicationBuilder builder, [ResourceName] string name, string appDirectory, string executableName)
         => AddPythonAppCore(builder, name, appDirectory, EntrypointType.Executable, executableName, DefaultVirtualEnvFolder);
@@ -258,6 +260,7 @@ public static class PythonAppResourceBuilderExtensions
     /// builder.Build().Run();
     /// </code>
     /// </example>
+    [AspireExport(Description = "Adds a Uvicorn-based Python application resource")]
     public static IResourceBuilder<UvicornAppResource> AddUvicornApp(
         this IDistributedApplicationBuilder builder, [ResourceName] string name, string appDirectory, string app)
     {
@@ -313,34 +316,11 @@ public static class PythonAppResourceBuilderExtensions
 
         if (builder.ExecutionContext.IsRunMode)
         {
-            builder.Eventing.Subscribe<BeforeStartEvent>((@event, cancellationToken) =>
+            // If a TLS certificate is configured, override the endpoint to use HTTPS instead of HTTP.
+            // Uvicorn only supports binding to a single port.
+            resourceBuilder.SubscribeHttpsEndpointsUpdate(ctx =>
             {
-                var developerCertificateService = @event.Services.GetRequiredService<IDeveloperCertificateService>();
-
-                bool addHttps = false;
-                if (!resourceBuilder.Resource.TryGetLastAnnotation<HttpsCertificateAnnotation>(out var annotation))
-                {
-                    if (developerCertificateService.UseForHttps)
-                    {
-                        // If no certificate is configured, and the developer certificate service supports container trust,
-                        // configure the resource to use the developer certificate for its key pair.
-                        addHttps = true;
-                    }
-                }
-                else if (annotation.UseDeveloperCertificate.GetValueOrDefault(developerCertificateService.UseForHttps) || annotation.Certificate is not null)
-                {
-                    addHttps = true;
-                }
-
-                if (addHttps)
-                {
-                    // If a TLS certificate is configured, override the endpoint to use HTTPS instead of HTTP
-                    // Uvicorn only supports binding to a single port
-                    resourceBuilder
-                        .WithEndpoint("http", ep => ep.UriScheme = "https");
-                }
-
-                return Task.CompletedTask;
+                resourceBuilder.WithEndpoint("http", ep => ep.UriScheme = "https");
             });
         }
 
@@ -365,8 +345,6 @@ public static class PythonAppResourceBuilderExtensions
         ArgumentException.ThrowIfNullOrEmpty(entrypoint);
         ArgumentNullException.ThrowIfNull(virtualEnvironmentPath);
 
-        // Register Python environment validation services (once per builder)
-        builder.Services.TryAddSingleton<PythonInstallationManager>();
         // When using the default virtual environment path, look for existing virtual environments
         // in multiple locations: app directory first, then AppHost directory as fallback
         var resolvedVenvPath = virtualEnvironmentPath;
@@ -513,7 +491,7 @@ public static class PythonAppResourceBuilderExtensions
             // and the dependencies will be established based on which resources actually exist
             // Only do this in run mode since the installer and venv creator only run in run mode
             var resourceToSetup = resourceBuilder.Resource;
-            builder.Eventing.Subscribe<BeforeStartEvent>((evt, ct) =>
+            builder.OnBeforeStart((evt, ct) =>
             {
                 // Wire up wait dependencies for this resource based on which child resources exist
                 SetupDependencies(builder, resourceToSetup);
@@ -874,6 +852,7 @@ public static class PythonAppResourceBuilderExtensions
     ///     .WithVirtualEnvironment("myenv", createIfNotExists: false);
     /// </code>
     /// </example>
+    [AspireExport(Description = "Configures the virtual environment for a Python application")]
     public static IResourceBuilder<T> WithVirtualEnvironment<T>(
         this IResourceBuilder<T> builder, string virtualEnvironmentPath, bool createIfNotExists = true) where T : PythonAppResource
     {
@@ -933,6 +912,7 @@ public static class PythonAppResourceBuilderExtensions
     /// the program or module to debug, and appropriate launch settings.
     /// </para>
     /// </remarks>
+    [AspireExport(Description = "Enables debugging support for a Python application")]
     public static IResourceBuilder<T> WithDebugging<T>(
         this IResourceBuilder<T> builder) where T : PythonAppResource
     {
@@ -950,23 +930,31 @@ public static class PythonAppResourceBuilderExtensions
         var entrypointType = entrypointAnnotation.Type;
         var entrypoint = entrypointAnnotation.Entrypoint;
 
-        string programPath;
-        string module;
-
-        if (entrypointType == EntrypointType.Script)
-        {
-            programPath = Path.GetFullPath(entrypoint, builder.Resource.WorkingDirectory);
-            module = string.Empty;
-        }
-        else
-        {
-            programPath = builder.Resource.WorkingDirectory;
-            module = entrypoint;
-        }
-
         builder.WithDebugSupport(
             mode =>
             {
+                // Compute paths inside the lambda so a later WithWorkingDirectory(...) override is respected.
+                var workingDirectory = builder.Resource.WorkingDirectory;
+
+                string programPath;
+                string module;
+
+                if (entrypointType == EntrypointType.Script)
+                {
+                    programPath = Path.GetFullPath(entrypoint, workingDirectory);
+                    module = string.Empty;
+                }
+                else
+                {
+                    // For Module and Executable entrypoints the new `working_directory` field on the launch
+                    // configuration carries the cwd to the Python debugger. Older versions of the VS Code
+                    // extension only look at `program_path`/`project_path` to derive the cwd and don't
+                    // understand `working_directory`, so to preserve backward compatibility we still
+                    // populate `ProgramPath` with the working directory like the previous behavior.
+                    programPath = workingDirectory;
+                    module = entrypoint;
+                }
+
                 string interpreterPath;
                 if (!builder.Resource.TryGetLastAnnotation<PythonEnvironmentAnnotation>(out var annotation) || annotation.VirtualEnvironment is null)
                 {
@@ -976,7 +964,7 @@ public static class PythonAppResourceBuilderExtensions
                 {
                     var venvPath = Path.IsPathRooted(annotation.VirtualEnvironment.VirtualEnvironmentPath)
                         ? annotation.VirtualEnvironment.VirtualEnvironmentPath
-                        : Path.GetFullPath(annotation.VirtualEnvironment.VirtualEnvironmentPath, builder.Resource.WorkingDirectory);
+                        : Path.GetFullPath(annotation.VirtualEnvironment.VirtualEnvironmentPath, workingDirectory);
 
                     if (OperatingSystem.IsWindows())
                     {
@@ -993,7 +981,8 @@ public static class PythonAppResourceBuilderExtensions
                     ProgramPath = programPath,
                     Module = module,
                     Mode = mode,
-                    InterpreterPath = interpreterPath
+                    InterpreterPath = interpreterPath,
+                    WorkingDirectory = workingDirectory
                 };
             },
             "python",
@@ -1061,6 +1050,7 @@ public static class PythonAppResourceBuilderExtensions
     ///     .WithArgs("main:app", "--reload");
     /// </code>
     /// </example>
+    [AspireExport(Description = "Configures the entrypoint for a Python application")]
     public static IResourceBuilder<T> WithEntrypoint<T>(
         this IResourceBuilder<T> builder, EntrypointType entrypointType, string entrypoint) where T : PythonAppResource
     {
@@ -1157,6 +1147,7 @@ public static class PythonAppResourceBuilderExtensions
     /// </code>
     /// </example>
     /// <exception cref="ArgumentNullException">Thrown when <paramref name="builder"/> is null.</exception>
+    [AspireExport(Description = "Configures pip package installation for a Python application")]
     public static IResourceBuilder<T> WithPip<T>(this IResourceBuilder<T> builder, bool install = true, string[]? installArgs = null)
         where T : PythonAppResource
     {
@@ -1253,13 +1244,11 @@ public static class PythonAppResourceBuilderExtensions
     /// </code>
     /// </example>
     /// <exception cref="ArgumentNullException">Thrown when <paramref name="builder"/> is null.</exception>
+    [AspireExport(Description = "Configures uv package management for a Python application")]
     public static IResourceBuilder<T> WithUv<T>(this IResourceBuilder<T> builder, bool install = true, string[]? args = null)
         where T : PythonAppResource
     {
         ArgumentNullException.ThrowIfNull(builder);
-
-        // Register UV validation service
-        builder.ApplicationBuilder.Services.TryAddSingleton<UvInstallationManager>();
 
         // Default args: sync only (uv will auto-detect Python and dependencies from pyproject.toml)
         args ??= ["sync"];
@@ -1340,6 +1329,7 @@ public static class PythonAppResourceBuilderExtensions
             }
 
             var installer = new PythonInstallerResource(installerName, builder.Resource);
+            installer.Annotations.Add(NameValidationPolicyAnnotation.None);
             var installerBuilder = builder.ApplicationBuilder.AddResource(installer)
                 .WithParentRelationship(builder.Resource)
                 .ExcludeFromManifest()
@@ -1352,21 +1342,7 @@ public static class PythonAppResourceBuilderExtensions
                 installerBuilder.WithExplicitStart();
             }
 
-            // Add validation for the installer command (uv or python)
-            installerBuilder.OnBeforeResourceStarted(static async (installerResource, e, ct) =>
-            {
-                // Check which command this installer is using (set by BeforeStartEvent)
-                if (installerResource.TryGetLastAnnotation<ExecutableAnnotation>(out var executable) &&
-                    executable.Command == "uv")
-                {
-                    // Validate that uv is installed - don't throw so the app fails as it normally would
-                    var uvInstallationManager = e.Services.GetRequiredService<UvInstallationManager>();
-                    await uvInstallationManager.EnsureInstalledAsync(throwOnFailure: false, ct).ConfigureAwait(false);
-                }
-                // For other package managers (pip, etc.), Python validation happens via PythonVenvCreatorResource
-            });
-
-            builder.ApplicationBuilder.Eventing.Subscribe<BeforeStartEvent>((_, _) =>
+            builder.ApplicationBuilder.OnBeforeStart((_, _) =>
             {
                 // Set the installer's working directory to match the resource's working directory
                 // and set the install command and args based on the resource's annotations
@@ -1382,6 +1358,13 @@ public static class PythonAppResourceBuilderExtensions
                     .WithCommand(packageManager.ExecutableName)
                     .WithWorkingDirectory(builder.Resource.WorkingDirectory)
                     .WithArgs(installCommand.Args);
+
+                // Add required command validation based on the package manager
+                if (packageManager.ExecutableName == "uv")
+                {
+                    installerBuilder.WithRequiredCommand("uv", "https://docs.astral.sh/uv/getting-started/installation/");
+                }
+                // For other package managers (pip, etc.), Python validation happens via PythonVenvCreatorResource
 
                 return Task.CompletedTask;
             });
@@ -1420,6 +1403,7 @@ public static class PythonAppResourceBuilderExtensions
 
         // Create new venv creator resource
         var venvCreator = new PythonVenvCreatorResource(venvCreatorName, builder.Resource, venvPath);
+        venvCreator.Annotations.Add(NameValidationPolicyAnnotation.None);
 
         // Determine which Python command to use
         string pythonCommand;
@@ -1440,12 +1424,7 @@ public static class PythonAppResourceBuilderExtensions
             .WithWorkingDirectory(builder.Resource.WorkingDirectory)
             .WithParentRelationship(builder.Resource)
             .ExcludeFromManifest()
-            .OnBeforeResourceStarted(static async (venvCreatorResource, e, ct) =>
-            {
-                // Validate that Python is installed before creating venv - don't throw so the app fails as it normally would
-                var pythonInstallationManager = e.Services.GetRequiredService<PythonInstallationManager>();
-                await pythonInstallationManager.EnsureInstalledAsync(throwOnFailure: false, ct).ConfigureAwait(false);
-            });
+            .WithRequiredCommand(pythonCommand, "https://www.python.org/downloads/");
 
         // Wait relationships will be set up dynamically in SetupDependencies
     }

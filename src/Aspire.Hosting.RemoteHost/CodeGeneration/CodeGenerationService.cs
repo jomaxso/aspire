@@ -1,7 +1,8 @@
 // Licensed to the .NET Foundation under one or more agreements.
 // The .NET Foundation licenses this file to you under the MIT license.
 
-using Aspire.Hosting.Ats;
+using Aspire.TypeSystem;
+using Aspire.Hosting.RemoteHost.Diagnostics;
 using Microsoft.Extensions.Logging;
 using StreamJsonRpc;
 
@@ -12,33 +13,60 @@ namespace Aspire.Hosting.RemoteHost.CodeGeneration;
 /// </summary>
 internal sealed class CodeGenerationService
 {
+    private const string GetCapabilitiesMethodName = "getCapabilities";
+    private const string GenerateCodeMethodName = "generateCode";
+
+    private readonly JsonRpcAuthenticationState _authenticationState;
     private readonly AtsContextFactory _atsContextFactory;
     private readonly CodeGeneratorResolver _resolver;
     private readonly ILogger<CodeGenerationService> _logger;
+    private readonly RemoteHostProfilingTelemetry _profilingTelemetry;
 
     public CodeGenerationService(
+        JsonRpcAuthenticationState authenticationState,
         AtsContextFactory atsContextFactory,
         CodeGeneratorResolver resolver,
-        ILogger<CodeGenerationService> logger)
+        ILogger<CodeGenerationService> logger,
+        RemoteHostProfilingTelemetry profilingTelemetry)
     {
+        _authenticationState = authenticationState;
         _atsContextFactory = atsContextFactory;
         _resolver = resolver;
         _logger = logger;
+        _profilingTelemetry = profilingTelemetry;
     }
 
     /// <summary>
-    /// Gets the ATS capabilities, types, and diagnostics.
+    /// Gets the ATS capabilities, types, exported values, and diagnostics.
     /// </summary>
+    /// <param name="assemblyNames">
+    /// An optional list of assembly names used to scope the returned capabilities and types to those
+    /// exported by the specified assemblies and their referenced assemblies. If <c>null</c> or empty,
+    /// capabilities are returned for all available assemblies.
+    /// </param>
     /// <returns>The capabilities information.</returns>
-    [JsonRpcMethod("getCapabilities")]
-    public CapabilitiesResponse GetCapabilities()
+    [JsonRpcMethod(GetCapabilitiesMethodName)]
+    public CapabilitiesResponse GetCapabilities(string[]? assemblyNames = null)
     {
-        _logger.LogDebug(">> getCapabilities()");
-        var sw = System.Diagnostics.Stopwatch.StartNew();
-
+        using var rpcActivity = _profilingTelemetry.StartJsonRpcServerCall(GetCapabilitiesMethodName);
+        using var activity = _profilingTelemetry.StartCodeGenerationGetCapabilities();
         try
         {
+            _authenticationState.ThrowIfNotAuthenticated();
+            _logger.LogDebug(">> getCapabilities()");
+            var sw = System.Diagnostics.Stopwatch.StartNew();
             var context = _atsContextFactory.GetContext();
+            if (assemblyNames is { Length: > 0 })
+            {
+                context = AtsContextFilter.FilterByExportingAssemblies(context, assemblyNames);
+            }
+            activity.SetAtsCounts(
+                context.Capabilities.Count,
+                context.HandleTypes.Count,
+                context.DtoTypes.Count,
+                context.EnumTypes.Count,
+                context.ExportedValues.Count,
+                context.Diagnostics.Count);
 
             var response = new CapabilitiesResponse
             {
@@ -46,6 +74,7 @@ internal sealed class CodeGenerationService
                 HandleTypes = context.HandleTypes.Select(MapHandleType).ToList(),
                 DtoTypes = context.DtoTypes.Select(MapDtoType).ToList(),
                 EnumTypes = context.EnumTypes.Select(MapEnumType).ToList(),
+                ExportedValues = context.ExportedValues.Select(MapExportedValue).ToList(),
                 Diagnostics = context.Diagnostics.Select(MapDiagnostic).ToList()
             };
 
@@ -54,6 +83,7 @@ internal sealed class CodeGenerationService
         }
         catch (Exception ex)
         {
+            activity.SetError(ex);
             _logger.LogError(ex, "<< getCapabilities() failed");
             throw;
         }
@@ -66,6 +96,7 @@ internal sealed class CodeGenerationService
         OwningTypeName = c.OwningTypeName,
         QualifiedMethodName = c.QualifiedMethodName,
         Description = c.Description,
+        Documentation = MapDocumentation(c.Documentation),
         CapabilityKind = c.CapabilityKind.ToString(),
         TargetTypeId = c.TargetTypeId,
         TargetParameterName = c.TargetParameterName,
@@ -86,10 +117,12 @@ internal sealed class CodeGenerationService
         CallbackParameters = p.CallbackParameters?.Select(cp => new CallbackParameterResponse
         {
             Name = cp.Name,
-            Type = MapTypeRef(cp.Type)
+            Type = MapTypeRef(cp.Type),
+            Documentation = MapDocumentation(cp.Documentation)
         }).ToList(),
         CallbackReturnType = p.CallbackReturnType != null ? MapTypeRef(p.CallbackReturnType) : null,
-        DefaultValue = p.DefaultValue?.ToString()
+        DefaultValue = p.DefaultValue?.ToString(),
+        Documentation = MapDocumentation(p.Documentation)
     };
 
     private static TypeRefResponse MapTypeRef(AtsTypeRef t) => new()
@@ -110,6 +143,7 @@ internal sealed class CodeGenerationService
         IsInterface = t.IsInterface,
         ExposeProperties = t.HasExposeProperties,
         ExposeMethods = t.HasExposeMethods,
+        Documentation = MapDocumentation(t.Documentation),
         ImplementedInterfaces = t.ImplementedInterfaces.Select(MapTypeRef).ToList(),
         BaseTypeHierarchy = t.BaseTypeHierarchy.Select(MapTypeRef).ToList()
     };
@@ -118,11 +152,15 @@ internal sealed class CodeGenerationService
     {
         TypeId = t.TypeId,
         Name = t.Name,
+        Description = t.Description,
+        Documentation = MapDocumentation(t.Documentation),
         Properties = t.Properties.Select(p => new DtoPropertyResponse
         {
             Name = p.Name,
             Type = MapTypeRef(p.Type),
-            IsOptional = p.IsOptional
+            IsOptional = p.IsOptional,
+            Description = p.Description,
+            Documentation = MapDocumentation(p.Documentation)
         }).ToList()
     };
 
@@ -130,8 +168,43 @@ internal sealed class CodeGenerationService
     {
         TypeId = t.TypeId,
         Name = t.Name,
-        Values = t.Values.ToList()
+        Values = t.Values.ToList(),
+        ValueInfos = t.ValueInfos.Select(value => new EnumValueResponse
+        {
+            Name = value.Name,
+            Documentation = MapDocumentation(value.Documentation)
+        }).ToList(),
+        Documentation = MapDocumentation(t.Documentation)
     };
+
+    private static ExportedValueResponse MapExportedValue(AtsExportedValueInfo value) => new()
+    {
+        PathSegments = value.PathSegments.ToList(),
+        Type = MapTypeRef(value.Type),
+        Value = value.Value?.DeepClone(),
+        Description = value.Description,
+        Documentation = MapDocumentation(value.Documentation)
+    };
+
+    private static DocumentationResponse? MapDocumentation(AtsDocumentationInfo? documentation)
+    {
+        if (documentation is null)
+        {
+            return null;
+        }
+
+        return new DocumentationResponse
+        {
+            Summary = documentation.Summary,
+            Remarks = documentation.Remarks,
+            Returns = documentation.Returns,
+            Parameters = documentation.Parameters.Select(parameter => new ParameterDocumentationResponse
+            {
+                Name = parameter.Name,
+                Description = parameter.Description
+            }).ToList()
+        };
+    }
 
     private static DiagnosticResponse MapDiagnostic(AtsDiagnostic d) => new()
     {
@@ -144,28 +217,39 @@ internal sealed class CodeGenerationService
     /// Generates SDK code for the specified language.
     /// </summary>
     /// <param name="language">The target language (e.g., "TypeScript", "Python").</param>
+    /// <param name="assemblyName">The exporting assembly to scope the generated SDK to, or null to use the full ATS context.</param>
     /// <returns>A dictionary of file paths to file contents.</returns>
-    [JsonRpcMethod("generateCode")]
-    public Dictionary<string, string> GenerateCode(string language)
+    [JsonRpcMethod(GenerateCodeMethodName)]
+    public Dictionary<string, string> GenerateCode(string language, string? assemblyName = null)
     {
-        _logger.LogDebug(">> generateCode({Language})", language);
-        var sw = System.Diagnostics.Stopwatch.StartNew();
-
+        using var rpcActivity = _profilingTelemetry.StartJsonRpcServerCall(GenerateCodeMethodName);
+        using var activity = _profilingTelemetry.StartCodeGenerationGenerate(language);
         try
         {
+            _authenticationState.ThrowIfNotAuthenticated();
+            _logger.LogDebug(">> generateCode({Language})", language);
+            var sw = System.Diagnostics.Stopwatch.StartNew();
             var generator = _resolver.GetCodeGenerator(language);
             if (generator == null)
             {
                 throw new ArgumentException($"No code generator found for language: {language}");
             }
 
-            var files = generator.GenerateDistributedApplication(_atsContextFactory.GetContext());
+            var context = _atsContextFactory.GetContext();
+            if (!string.IsNullOrWhiteSpace(assemblyName))
+            {
+                context = AtsContextFilter.FilterByExportingAssembliesWithReferences(context, [assemblyName]);
+            }
+
+            var files = generator.GenerateDistributedApplication(context);
+            activity.SetFileCount(files.Count);
 
             _logger.LogDebug("<< generateCode({Language}) completed in {ElapsedMs}ms, generated {FileCount} files", language, sw.ElapsedMilliseconds, files.Count);
             return files;
         }
         catch (Exception ex)
         {
+            activity.SetError(ex);
             _logger.LogError(ex, "<< generateCode({Language}) failed", language);
             throw;
         }
@@ -180,6 +264,7 @@ internal sealed class CapabilitiesResponse
     public List<HandleTypeResponse> HandleTypes { get; set; } = [];
     public List<DtoTypeResponse> DtoTypes { get; set; } = [];
     public List<EnumTypeResponse> EnumTypes { get; set; } = [];
+    public List<ExportedValueResponse> ExportedValues { get; set; } = [];
     public List<DiagnosticResponse> Diagnostics { get; set; } = [];
 }
 
@@ -190,6 +275,7 @@ internal sealed class CapabilityResponse
     public string? OwningTypeName { get; set; }
     public string QualifiedMethodName { get; set; } = "";
     public string? Description { get; set; }
+    public DocumentationResponse? Documentation { get; set; }
     public string CapabilityKind { get; set; } = "";
     public string? TargetTypeId { get; set; }
     public string? TargetParameterName { get; set; }
@@ -210,12 +296,14 @@ internal sealed class ParameterResponse
     public List<CallbackParameterResponse>? CallbackParameters { get; set; }
     public TypeRefResponse? CallbackReturnType { get; set; }
     public string? DefaultValue { get; set; }
+    public DocumentationResponse? Documentation { get; set; }
 }
 
 internal sealed class CallbackParameterResponse
 {
     public string Name { get; set; } = "";
     public TypeRefResponse? Type { get; set; }
+    public DocumentationResponse? Documentation { get; set; }
 }
 
 internal sealed class TypeRefResponse
@@ -236,6 +324,7 @@ internal sealed class HandleTypeResponse
     public bool IsInterface { get; set; }
     public bool ExposeProperties { get; set; }
     public bool ExposeMethods { get; set; }
+    public DocumentationResponse? Documentation { get; set; }
     public List<TypeRefResponse> ImplementedInterfaces { get; set; } = [];
     public List<TypeRefResponse> BaseTypeHierarchy { get; set; } = [];
 }
@@ -244,6 +333,8 @@ internal sealed class DtoTypeResponse
 {
     public string TypeId { get; set; } = "";
     public string Name { get; set; } = "";
+    public string? Description { get; set; }
+    public DocumentationResponse? Documentation { get; set; }
     public List<DtoPropertyResponse> Properties { get; set; } = [];
 }
 
@@ -252,6 +343,8 @@ internal sealed class DtoPropertyResponse
     public string Name { get; set; } = "";
     public TypeRefResponse? Type { get; set; }
     public bool IsOptional { get; set; }
+    public string? Description { get; set; }
+    public DocumentationResponse? Documentation { get; set; }
 }
 
 internal sealed class EnumTypeResponse
@@ -259,6 +352,37 @@ internal sealed class EnumTypeResponse
     public string TypeId { get; set; } = "";
     public string Name { get; set; } = "";
     public List<string> Values { get; set; } = [];
+    public List<EnumValueResponse> ValueInfos { get; set; } = [];
+    public DocumentationResponse? Documentation { get; set; }
+}
+
+internal sealed class EnumValueResponse
+{
+    public string Name { get; set; } = "";
+    public DocumentationResponse? Documentation { get; set; }
+}
+
+internal sealed class ExportedValueResponse
+{
+    public List<string> PathSegments { get; set; } = [];
+    public TypeRefResponse Type { get; set; } = null!;
+    public System.Text.Json.Nodes.JsonNode? Value { get; set; }
+    public string? Description { get; set; }
+    public DocumentationResponse? Documentation { get; set; }
+}
+
+internal sealed class DocumentationResponse
+{
+    public string? Summary { get; set; }
+    public string? Remarks { get; set; }
+    public string? Returns { get; set; }
+    public List<ParameterDocumentationResponse> Parameters { get; set; } = [];
+}
+
+internal sealed class ParameterDocumentationResponse
+{
+    public string Name { get; set; } = "";
+    public string Description { get; set; } = "";
 }
 
 internal sealed class DiagnosticResponse
