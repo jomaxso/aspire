@@ -20,12 +20,14 @@ internal sealed class IntegrationPackageSearchService(
     IInteractionService interactionService,
     CliExecutionContext executionContext,
     IAppHostProjectFactory projectFactory,
-    IPackageTagMetadataService packageTagMetadataService)
+    IPackageTagMetadataService packageTagMetadataService,
+    IFeatures features)
 {
     private const double FuzzyMatchThreshold = 0.3;
     private const int MaxThirdPartyVerificationConcurrency = 16;
     private const string RequestedSourceChannelName = "source";
     private const string ThirdPartyChannelName = "third-party";
+    private readonly IFeatures _features = features;
 
     public async Task<IEnumerable<(NuGetPackage Package, PackageChannel Channel)>> GetIntegrationPackagesWithChannelsAsync(DirectoryInfo workingDirectory, string? configuredChannel, IntegrationDiscoveryScope discoveryScope, string? requestedSource = null, CancellationToken cancellationToken = default)
     {
@@ -299,7 +301,8 @@ internal sealed class IntegrationPackageSearchService(
             RequestedSourceChannelName,
             PackageChannelQuality.Both,
             [new PackageMapping(PackageMapping.AllPackages, requestedSource)],
-            nuGetPackageCache);
+            nuGetPackageCache,
+            _features);
     }
 
     private PackageChannel[] GetConfiguredThirdPartyChannels(DirectoryInfo workingDirectory, string? configuredChannel, IntegrationDiscoveryScope discoveryScope)
@@ -315,7 +318,8 @@ internal sealed class IntegrationPackageSearchService(
             feeds.Length == 1 ? ThirdPartyChannelName : $"{ThirdPartyChannelName}-{index + 1}",
             PackageChannelQuality.Stable,
             [new PackageMapping(PackageMapping.AllPackages, feed)],
-            nuGetPackageCache))
+            nuGetPackageCache,
+            _features))
             .ToArray();
     }
 }

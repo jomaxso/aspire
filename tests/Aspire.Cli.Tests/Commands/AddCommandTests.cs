@@ -557,7 +557,7 @@ public class AddCommandTests(ITestOutputHelper outputHelper)
                 ])
             };
         });
-        services.AddSingleton<IAppHostProjectFactory>(new TestTypeScriptStarterProjectFactory((_, _) => Task.FromResult(true)));
+        services.AddSingleton<IAppHostProjectFactory>(new TestTypeScriptStarterProjectFactory((_, _, _) => Task.FromResult(true)));
         using var handler = new MockHttpMessageHandler(request => request.RequestUri?.AbsoluteUri switch
         {
             source => CreateJsonResponse("""

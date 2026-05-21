@@ -16,6 +16,8 @@ namespace Aspire.Cli.Packaging;
 
 internal class PackageChannel(string name, PackageChannelQuality quality, PackageMapping[]? mappings, INuGetPackageCache nuGetPackageCache, IFeatures features, bool configureGlobalPackagesFolder = false, string? cliDownloadBaseUrl = null, string? pinnedVersion = null, ILogger? logger = null)
 {
+    private static readonly IFeatures s_defaultFeatures = new DisabledFeatures();
+
     // Threaded so the local-folder integration listing can honor the same
     // ShowDeprecatedPackages flag that NuGetPackageCache honors on the feed-based path.
     // Without this, flipping the flag silently has no effect on local hive / PR hive listings
@@ -23,6 +25,11 @@ internal class PackageChannel(string name, PackageChannelQuality quality, Packag
     private readonly IFeatures _features = features;
 
     private const string GuestAppHostSdkPackageId = "Aspire.Hosting";
+
+    internal PackageChannel(string name, PackageChannelQuality quality, PackageMapping[]? mappings, INuGetPackageCache nuGetPackageCache, bool configureGlobalPackagesFolder = false, string? cliDownloadBaseUrl = null, string? pinnedVersion = null, ILogger? logger = null)
+        : this(name, quality, mappings, nuGetPackageCache, s_defaultFeatures, configureGlobalPackagesFolder, cliDownloadBaseUrl, pinnedVersion, logger)
+    {
+    }
 
     public string Name { get; } = name;
     public PackageChannelQuality Quality { get; } = quality;
@@ -599,6 +606,11 @@ internal class PackageChannel(string name, PackageChannelQuality quality, Packag
         return new PackageChannel(name, quality, mappings, nuGetPackageCache, features, configureGlobalPackagesFolder, cliDownloadBaseUrl, pinnedVersion, logger);
     }
 
+    public static PackageChannel CreateExplicitChannel(string name, PackageChannelQuality quality, PackageMapping[]? mappings, INuGetPackageCache nuGetPackageCache, bool configureGlobalPackagesFolder = false, string? cliDownloadBaseUrl = null, string? pinnedVersion = null, ILogger? logger = null)
+    {
+        return new PackageChannel(name, quality, mappings, nuGetPackageCache, s_defaultFeatures, configureGlobalPackagesFolder, cliDownloadBaseUrl, pinnedVersion, logger);
+    }
+
     public static PackageChannel CreateImplicitChannel(INuGetPackageCache nuGetPackageCache, IFeatures features, ILogger? logger = null)
     {
         // The reason that PackageChannelQuality.Both is because there are situations like
@@ -607,5 +619,19 @@ internal class PackageChannel(string name, PackageChannelQuality quality, Packag
         // version. Not really an issue for template selection though (unless we start allowing)
         // for broader templating options.
         return new PackageChannel("default", PackageChannelQuality.Both, null, nuGetPackageCache, features, logger: logger);
+    }
+
+    public static PackageChannel CreateImplicitChannel(INuGetPackageCache nuGetPackageCache, ILogger? logger = null)
+    {
+        return CreateImplicitChannel(nuGetPackageCache, s_defaultFeatures, logger);
+    }
+
+    private sealed class DisabledFeatures : IFeatures
+    {
+        public bool IsFeatureEnabled(string featureFlag, bool defaultValue) => defaultValue;
+
+        public void LogFeatureState()
+        {
+        }
     }
 }
