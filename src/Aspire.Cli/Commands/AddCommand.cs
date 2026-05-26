@@ -110,7 +110,7 @@ internal sealed class AddCommand : BaseCommand
             AppHostProjectSearchResult searchResult;
             using (var findAppHostActivity = _profilingTelemetry.StartAddFindAppHost(passedAppHostProjectFile))
             {
-                searchResult = await _projectLocator.UseOrFindAppHostProjectFileAsync(passedAppHostProjectFile, MultipleAppHostProjectsFoundBehavior.Prompt, createSettingsFile: true, cancellationToken);
+                searchResult = await _projectLocator.UseOrFindAppHostProjectFileAsync(passedAppHostProjectFile, MultipleAppHostProjectsFoundBehavior.Prompt, createSettingsFile: false, cancellationToken);
                 findAppHostActivity.SetAppHostCandidateCount(searchResult.AllProjectFileCandidates.Count);
             }
             addActivity.SetAppHostCandidateCount(searchResult.AllProjectFileCandidates.Count);
@@ -188,11 +188,11 @@ internal sealed class AddCommand : BaseCommand
                 throw new EmptyChoicesException(AddCommandStrings.NoIntegrationPackagesFound);
             }
 
-            var packagesWithShortName = packagesWithChannels.Select(IntegrationPackageSearchService.GenerateFriendlyName).OrderBy(p => p.FriendlyName, new CommunityToolkitFirstComparer()).ToList();
+            var packagesWithShortName = packagesWithChannels.Select(IntegrationPackageSearchService.GenerateFriendlyName).OrderBy(p => p.FriendlyName, StringComparer.OrdinalIgnoreCase).ToList();
 
             if (integrationName is null && _hostEnvironment.SupportsInteractiveInput)
             {
-                packagesWithShortName = await ExcludeInstalledPackagesAsync(effectiveAppHostProjectFile, project, packagesWithShortName, cancellationToken);
+                packagesWithShortName = [.. await ExcludeInstalledPackagesAsync(effectiveAppHostProjectFile, project, packagesWithShortName, cancellationToken)];
             }
 
             if (!packagesWithShortName.Any() && integrationName is null)
@@ -213,7 +213,7 @@ internal sealed class AddCommand : BaseCommand
                 ? ProfilingTelemetry.Values.AddPackageMatchKindExact
                 : ProfilingTelemetry.Values.AddPackageMatchKindNone;
 
-            var exactPackageIdMatches = Array.Empty<(string FriendlyName, NuGetPackage Package, PackageChannel Channel)>();
+            List<(string FriendlyName, NuGetPackage Package, PackageChannel Channel)> exactPackageIdMatches = [];
 
             if (!filteredPackagesWithShortName.Any() && integrationName is not null)
             {
@@ -229,7 +229,7 @@ internal sealed class AddCommand : BaseCommand
                     .Select(IntegrationPackageSearchService.GenerateFriendlyName)
                 ];
 
-                if (exactPackageIdMatches.Length > 0)
+                if (exactPackageIdMatches.Count > 0)
                 {
                     filteredPackagesWithShortName = exactPackageIdMatches;
                 }
@@ -244,9 +244,9 @@ internal sealed class AddCommand : BaseCommand
                         cancellationToken,
                         source))
                     .Select(IntegrationPackageSearchService.GenerateFriendlyName)
-                    .ToArray();
+                    .ToList();
 
-                if (builtInPackageMatches.Length > 0)
+                if (builtInPackageMatches.Count > 0)
                 {
                     filteredPackagesWithShortName = builtInPackageMatches;
                 }
@@ -263,7 +263,7 @@ internal sealed class AddCommand : BaseCommand
                 // then try a fuzzy search to create a broader filtered list.
                 // Materialize the query with ToList() to avoid multiple enumerations
                 // (which would recalculate fuzzy scores on each Count()/First() call).
-                var fuzzySearchSource = _hostEnvironment.SupportsInteractiveInput
+                IEnumerable<(string FriendlyName, NuGetPackage Package, PackageChannel Channel)> fuzzySearchSource = _hostEnvironment.SupportsInteractiveInput
                     ? await ExcludeInstalledPackagesAsync(effectiveAppHostProjectFile, project, packagesWithShortName, cancellationToken)
                     : packagesWithShortName;
 
@@ -464,6 +464,7 @@ internal sealed class AddCommand : BaseCommand
         var (exitCode, output) = await _runner.GetProjectItemsAndPropertiesAsync(
             appHostProjectFile,
             ["PackageReference"],
+            [],
             [],
             new ProcessInvocationOptions { SuppressLogging = true },
             cancellationToken);
