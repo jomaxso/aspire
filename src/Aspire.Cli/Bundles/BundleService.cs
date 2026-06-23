@@ -418,7 +418,10 @@ internal sealed class BundleService(
             InstallSourceExtensions.ScriptWire
                 or InstallSourceExtensions.PrWire
                 or InstallSourceExtensions.LocalHiveWire => Path.GetDirectoryName(binaryDir) ?? binaryDir,
-            _ => Path.GetDirectoryName(binaryDir) ?? binaryDir,
+            // Sidecar-less binaries can be installed in arbitrary locations, including
+            // read-only package stores. Default to user-owned Aspire home unless a
+            // route-specific sidecar explicitly opts in to colocated extraction.
+            _ => CliPathHelper.GetDefaultAspireHomeDirectory(),
         };
     }
 
@@ -727,6 +730,10 @@ internal sealed class BundleService(
     /// </summary>
     internal static string GetCurrentVersion(string? processPath = null)
     {
+        // physical-binary-version-by-design (see docs/specs/cli-identity-sidecar.md):
+        // this fingerprints the single-file bundle's OWN binary so re-extraction is triggered
+        // when the installed bundle changes. It describes the file on disk, not the emulated
+        // ASPIRE_CLI_VERSION identity, so it must read the assembly version directly.
         var version = VersionHelper.GetDefaultTemplateVersion();
         processPath ??= Environment.ProcessPath;
 

@@ -4,9 +4,11 @@
 using Aspire.Cli.Configuration;
 using Aspire.Cli.Projects;
 using Aspire.Cli.Scaffolding;
+using Aspire.Cli.Telemetry;
 using Aspire.Cli.Tests.TestServices;
 using Aspire.Cli.Tests.Utils;
 using Aspire.Cli.Utils;
+using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Logging.Abstractions;
 using System.Diagnostics;
 
@@ -48,7 +50,7 @@ public class ChannelReseedTests(ITestOutputHelper outputHelper)
     {
         using var workspace = TemporaryWorkspace.Create(outputHelper);
 
-        var scaffoldingService = CreateScaffoldingService();
+        var scaffoldingService = CreateScaffoldingService(workspace);
 
         var ctx = new ScaffoldContext(
             Language: s_testLanguage,
@@ -85,9 +87,12 @@ public class ChannelReseedTests(ITestOutputHelper outputHelper)
             {
                 CreateAsyncCallback = (_, _) => Task.FromResult<IAppHostServerProject>(appHostServerProject)
             },
+            appHostServerSessionFactory: new TestAppHostServerSessionFactory(),
             languageDiscovery: new TestLanguageDiscovery(language),
             interactionService: new TestInteractionService(),
-            logger: NullLogger<ScaffoldingService>.Instance);
+            logger: NullLogger<ScaffoldingService>.Instance,
+            executionContext: workspace.CreateExecutionContext(),
+            profilingTelemetry: new ProfilingTelemetry(new ConfigurationBuilder().Build()));
 
         var context = new ScaffoldContext(
             Language: language,
@@ -110,13 +115,16 @@ public class ChannelReseedTests(ITestOutputHelper outputHelper)
         CodeGenerator: "TypeScript",
         AppHostFileName: "apphost.ts");
 
-    private static ScaffoldingService CreateScaffoldingService()
+    private static ScaffoldingService CreateScaffoldingService(TemporaryWorkspace workspace)
     {
         return new ScaffoldingService(
             appHostServerProjectFactory: new TestAppHostServerProjectFactory(),
+            appHostServerSessionFactory: new TestAppHostServerSessionFactory(),
             languageDiscovery: new TestLanguageDiscovery(s_testLanguage),
             interactionService: new TestInteractionService(),
-            logger: NullLogger<ScaffoldingService>.Instance);
+            logger: NullLogger<ScaffoldingService>.Instance,
+            executionContext: workspace.CreateExecutionContext(),
+            profilingTelemetry: new ProfilingTelemetry(new ConfigurationBuilder().Build()));
     }
 
     private sealed class CapturingAppHostServerProject(string appDirectoryPath) : IAppHostServerProject

@@ -4,6 +4,7 @@
 using System.Text;
 using Aspire.Cli.Acquisition;
 using Aspire.Cli.Agents;
+using Aspire.Cli.Agents.AspireSkills;
 using Aspire.Cli.Agents.Playwright;
 using Aspire.Cli.Backchannel;
 using Aspire.Cli.Bundles;
@@ -47,6 +48,12 @@ namespace Aspire.Cli.Tests.Utils;
 
 internal static class CliTestHelper
 {
+    public static InstallSidecarReader CreateSidecarReader(ITestOutputHelper outputHelper)
+    {
+        var loggerFactory = LoggerFactory.Create(builder => builder.AddXunit(outputHelper));
+        return new InstallSidecarReader(loggerFactory.CreateLogger<InstallSidecarReader>());
+    }
+
     public static IServiceCollection CreateServiceCollection(TemporaryWorkspace workspace, ITestOutputHelper outputHelper, Action<CliServiceCollectionTestOptions>? configure = null)
     {
         var options = new CliServiceCollectionTestOptions(outputHelper, workspace.WorkspaceRoot);
@@ -82,7 +89,7 @@ internal static class CliTestHelper
 
         var globalSettingsFilePath = Path.Combine(options.WorkingDirectory.FullName, ".aspire", "settings.global.json");
         var globalSettingsFile = new FileInfo(globalSettingsFilePath);
-        ConfigurationHelper.RegisterSettingsFiles(configBuilder, options.WorkingDirectory, globalSettingsFile, NullLogger.Instance);
+        ConfigurationHelper.RegisterSettingsFiles(configBuilder, options.WorkingDirectory, globalSettingsFile);
 
         var configuration = configBuilder.Build();
         services.AddSingleton<IConfiguration>(configuration);
@@ -147,6 +154,7 @@ internal static class CliTestHelper
         services.AddSingleton(options.GitRepositoryFactory);
         services.AddSingleton(options.NpmRunnerFactory);
         services.AddSingleton(options.NpmProvenanceCheckerFactory);
+        services.AddSingleton(options.AspireSkillsInstallerFactory);
         services.AddSingleton(options.PlaywrightCliRunnerFactory);
         services.AddSingleton<PlaywrightCliInstaller>();
         services.AddSingleton(options.ScaffoldingServiceFactory);
@@ -176,6 +184,7 @@ internal static class CliTestHelper
         // IdentityChannelReader for AspireVersionCheck (doctor) — uses the same
         // pattern as production wiring in Program.cs.
         services.AddSingleton<IIdentityChannelReader>(_ => new IdentityChannelReader(typeof(Program).Assembly));
+        services.AddSingleton<IEnvironment, TestEnvironment>();
         services.AddSingleton<ProfileCaptureService>();
 
         // AppHost project handlers - must match Program.cs registration pattern
@@ -187,12 +196,15 @@ internal static class CliTestHelper
         services.AddSingleton(options.AppHostProjectFactory);
 
         services.AddSingleton<IEnvironmentCheck, AspireVersionCheck>();
+        services.AddSingleton<IEnvironmentCheck, OperatingSystemCheck>();
         services.AddSingleton<IEnvironmentCheck, WslEnvironmentCheck>();
         services.AddSingleton<IEnvironmentCheck, DotNetSdkCheck>();
         services.AddSingleton<IEnvironmentCheck, TypeScriptAppHostToolingCheck>();
         services.AddSingleton<IEnvironmentCheck, DeprecatedWorkloadCheck>();
         services.AddSingleton<IEnvironmentCheck, DevCertsCheck>();
         services.AddSingleton<IEnvironmentCheck, ContainerRuntimeCheck>();
+        services.AddSingleton<IDcpConnectionChecker, TestDcpConnectionChecker>();
+        services.AddSingleton<IEnvironmentCheck, DcpConnectionHealthCheck>();
         services.AddSingleton<IEnvironmentCheck, DeprecatedAgentConfigCheck>();
         services.AddSingleton<IEnvironmentChecker, EnvironmentChecker>();
 
@@ -209,6 +221,9 @@ internal static class CliTestHelper
         services.AddSingleton<IApiDocsFetcher, TestApiDocsFetcher>();
         services.AddSingleton(options.ApiDocsIndexServiceFactory);
 
+        services.AddSingleton(new ConsoleCancellationManager(processTerminationTimeout: Timeout.InfiniteTimeSpan));
+        services.AddSingleton<CommonCommandServices>();
+        services.AddTransient<AppHostConnectionResolver>();
         services.AddTransient<RootCommand>();
         services.AddTransient<NewCommand>();
         services.AddTransient<InitCommand>();
@@ -221,6 +236,9 @@ internal static class CliTestHelper
         services.AddTransient<PsCommand>();
         services.AddTransient<DescribeCommand>();
         services.AddTransient<LogsCommand>();
+        services.AddTransient<TerminalCommand>();
+        services.AddTransient<TerminalAttachCommand>();
+        services.AddTransient<TerminalPsCommand>();
         services.AddTransient<IntegrationPackageSearchService>();
         services.AddTransient<IntegrationCommand>();
         services.AddTransient<IntegrationListCommand>();
@@ -471,16 +489,18 @@ internal sealed class CliServiceCollectionTestOptions
         var telemetry = serviceProvider.GetRequiredService<AspireCliTelemetry>();
         var hostEnvironment = serviceProvider.GetRequiredService<ICliHostEnvironment>();
         var executionContext = serviceProvider.GetRequiredService<CliExecutionContext>();
-        return new CertificateService(certificateToolRunner, interactiveService, telemetry, hostEnvironment, executionContext);
+        return new CertificateService(certificateToolRunner, interactiveService, telemetry, hostEnvironment, executionContext, serviceProvider.GetRequiredService<IEnvironment>());
     };
 
     public Func<IServiceProvider, IScaffoldingService> ScaffoldingServiceFactory { get; set; } = (IServiceProvider serviceProvider) =>
     {
         var appHostServerProjectFactory = serviceProvider.GetRequiredService<IAppHostServerProjectFactory>();
+        var appHostServerSessionFactory = serviceProvider.GetRequiredService<IAppHostServerSessionFactory>();
         var languageDiscovery = serviceProvider.GetRequiredService<ILanguageDiscovery>();
         var interactionService = serviceProvider.GetRequiredService<IInteractionService>();
         var logger = serviceProvider.GetRequiredService<ILogger<ScaffoldingService>>();
-        return new ScaffoldingService(appHostServerProjectFactory, languageDiscovery, interactionService, logger);
+        var executionContext = serviceProvider.GetRequiredService<CliExecutionContext>();
+        return new ScaffoldingService(appHostServerProjectFactory, appHostServerSessionFactory, languageDiscovery, interactionService, logger, executionContext, serviceProvider.GetRequiredService<ProfilingTelemetry>());
     };
 
     public Func<IServiceProvider, IProcessExecutionFactory> DotNetCliExecutionFactoryFactory { get; set; } = (IServiceProvider serviceProvider) =>
@@ -528,7 +548,8 @@ internal sealed class CliServiceCollectionTestOptions
     public Func<IServiceProvider, IExtensionRpcTarget> ExtensionRpcTargetFactory { get; set; } = (IServiceProvider serviceProvider) =>
     {
         var configuration = serviceProvider.GetRequiredService<IConfiguration>();
-        return new ExtensionRpcTarget(configuration);
+        var executionContext = serviceProvider.GetRequiredService<CliExecutionContext>();
+        return new ExtensionRpcTarget(configuration, executionContext);
     };
 
     public Func<IServiceProvider, IExtensionBackchannel> ExtensionBackchannelFactory { get; set; } = serviceProvider =>
@@ -576,7 +597,14 @@ internal sealed class CliServiceCollectionTestOptions
         var nuGetPackageCache = serviceProvider.GetRequiredService<INuGetPackageCache>();
         var features = serviceProvider.GetRequiredService<IFeatures>();
         var configuration = serviceProvider.GetRequiredService<IConfiguration>();
-        return new PackagingService(executionContext, nuGetPackageCache, features, configuration, NullLogger<PackagingService>.Instance);
+        // Force prerelease-shaped CLI version semantics in tests so PackagingService's
+        // identity-staging quality default does not depend on whether the test-host assembly
+        // was produced under StabilizePackageVersion=true. Without this, tests that rely on
+        // the shared-daily routing for `staging` identity (quality=Both → useSharedFeed=true)
+        // would fail under the stabilization-check job which builds with a stable-shaped
+        // version (no '-' suffix) baked in. Tests that specifically exercise the stable-shape
+        // branch construct PackagingService directly with isStableShapedCliVersion: () => true.
+        return new PackagingService(executionContext, nuGetPackageCache, features, configuration, NullLogger<PackagingService>.Instance, isStableShapedCliVersion: () => false);
     };
 
     public Func<IServiceProvider, IDiskCache> DiskCacheFactory { get; set; } = (IServiceProvider serviceProvider) => new NullDiskCache();
@@ -609,6 +637,8 @@ internal sealed class CliServiceCollectionTestOptions
     public Func<IServiceProvider, INpmRunner> NpmRunnerFactory { get; set; } = _ => new FakeNpmRunner();
 
     public Func<IServiceProvider, INpmProvenanceChecker> NpmProvenanceCheckerFactory { get; set; } = _ => new FakeNpmProvenanceChecker();
+
+    public Func<IServiceProvider, IAspireSkillsInstaller> AspireSkillsInstallerFactory { get; set; } = serviceProvider => new FakeAspireSkillsInstaller(serviceProvider.GetRequiredService<CliExecutionContext>());
 
     public Func<IServiceProvider, IPlaywrightCliRunner> PlaywrightCliRunnerFactory { get; set; } = _ => new FakePlaywrightCliRunner();
 
@@ -677,6 +707,30 @@ internal sealed class NullLayoutDiscovery : ILayoutDiscovery
     public string? GetComponentPath(LayoutComponent component, string? projectDirectory = null) => null;
 
     public bool IsBundleModeAvailable(string? projectDirectory = null) => false;
+}
+
+internal sealed class FixedLayoutDiscovery : ILayoutDiscovery
+{
+    private readonly LayoutConfiguration? _layout;
+    private readonly Dictionary<LayoutComponent, string> _componentPaths = [];
+
+    public FixedLayoutDiscovery(LayoutConfiguration layout)
+    {
+        _layout = layout;
+    }
+
+    public FixedLayoutDiscovery(LayoutComponent component, string componentPath)
+    {
+        _componentPaths.Add(component, componentPath);
+    }
+
+    public LayoutConfiguration? DiscoverLayout(string? projectDirectory = null) => _layout;
+
+    public string? GetComponentPath(LayoutComponent component, string? projectDirectory = null) =>
+        _layout?.GetComponentPath(component) ??
+        (_componentPaths.TryGetValue(component, out var componentPath) ? componentPath : null);
+
+    public bool IsBundleModeAvailable(string? projectDirectory = null) => _layout is not null || _componentPaths.Count > 0;
 }
 
 /// <summary>

@@ -8,6 +8,7 @@ using Aspire.Cli.Configuration;
 using Aspire.Cli.Interaction;
 using Aspire.Cli.Projects;
 using Aspire.Cli.Resources;
+using Aspire.Cli.Telemetry;
 using Aspire.Cli.Utils;
 using Aspire.Hosting.Utils;
 using Microsoft.Extensions.Logging;
@@ -38,20 +39,29 @@ internal sealed class ScaffoldingService : IScaffoldingService
     };
 
     private readonly IAppHostServerProjectFactory _appHostServerProjectFactory;
+    private readonly IAppHostServerSessionFactory _appHostServerSessionFactory;
     private readonly ILanguageDiscovery _languageDiscovery;
     private readonly IInteractionService _interactionService;
     private readonly ILogger<ScaffoldingService> _logger;
+    private readonly CliExecutionContext _executionContext;
+    private readonly ProfilingTelemetry _profilingTelemetry;
 
     public ScaffoldingService(
         IAppHostServerProjectFactory appHostServerProjectFactory,
+        IAppHostServerSessionFactory appHostServerSessionFactory,
         ILanguageDiscovery languageDiscovery,
         IInteractionService interactionService,
-        ILogger<ScaffoldingService> logger)
+        ILogger<ScaffoldingService> logger,
+        CliExecutionContext executionContext,
+        ProfilingTelemetry profilingTelemetry)
     {
         _appHostServerProjectFactory = appHostServerProjectFactory;
+        _appHostServerSessionFactory = appHostServerSessionFactory;
         _languageDiscovery = languageDiscovery;
         _interactionService = interactionService;
         _logger = logger;
+        _executionContext = executionContext;
+        _profilingTelemetry = profilingTelemetry;
     }
 
     /// <inheritdoc />
@@ -73,7 +83,7 @@ internal sealed class ScaffoldingService : IScaffoldingService
 
         // Step 1: Resolve SDK and package strategy
         var sdkVersion = string.IsNullOrWhiteSpace(context.SdkVersion)
-            ? VersionHelper.GetDefaultSdkVersion()
+            ? _executionContext.IdentitySdkVersion
             : context.SdkVersion;
         var config = AspireConfigFile.LoadOrCreate(directory.FullName, sdkVersion);
         if (!string.IsNullOrWhiteSpace(context.SdkVersion))
@@ -136,11 +146,10 @@ internal sealed class ScaffoldingService : IScaffoldingService
         }
 
         // Step 2: Start the server temporarily for scaffolding and code generation
-        await using var serverSession = AppHostServerSession.Start(
+        await using var serverSession = _appHostServerSessionFactory.Start(
             appHostServerProject,
             environmentVariables: null,
-            debug: false,
-            _logger);
+            debug: false);
 
         // Step 3: Connect to server and get scaffold templates via RPC
         var rpcClient = await serverSession.GetRpcClientAsync(cancellationToken);
@@ -288,15 +297,35 @@ internal sealed class ScaffoldingService : IScaffoldingService
         }
 
         var scripts = EnsureJsonObject(packageJson, "scripts");
-        var toolchain = TypeScriptAppHostToolchainResolver.Resolve(rootDirectory, _logger);
         var relativeAppHostDirectory = PathNormalizer.NormalizePathForStorage(Path.GetRelativePath(rootDirectory.FullName, appHostDirectory.FullName));
+        var preservedScriptNames = AddRootTypeScriptAppHostDelegateScripts(scripts, appHostDirectory, relativeAppHostDirectory, _logger);
 
-        scripts["aspire:start"] = CreateRootDelegateScript(toolchain, relativeAppHostDirectory, "aspire:start");
-        scripts["aspire:build"] = CreateRootDelegateScript(toolchain, relativeAppHostDirectory, "aspire:build");
-        scripts["aspire:dev"] = CreateRootDelegateScript(toolchain, relativeAppHostDirectory, "aspire:dev");
+        if (preservedScriptNames.Count > 0)
+        {
+            _interactionService.DisplayMessage(
+                KnownEmojis.Warning,
+                $"Preserved existing package.json script(s) {string.Join(", ", preservedScriptNames)}. Run the AppHost directly from {relativeAppHostDirectory} or remove the existing script(s) and rerun 'aspire init' to regenerate the root delegates.");
+        }
 
         var serializedPackageJson = SerializePackageJson(packageJson, existingContent);
         await File.WriteAllTextAsync(packageJsonPath, serializedPackageJson, cancellationToken);
+    }
+
+    internal static IReadOnlyList<string> AddRootTypeScriptAppHostDelegateScripts(JsonObject scripts, TypeScriptAppHostToolchain toolchain, string relativeAppHostDirectory)
+    {
+        List<string>? preservedScriptNames = null;
+
+        AddRootTypeScriptAppHostDelegateScript(scripts, toolchain, relativeAppHostDirectory, "aspire:start", ref preservedScriptNames);
+        AddRootTypeScriptAppHostDelegateScript(scripts, toolchain, relativeAppHostDirectory, "aspire:build", ref preservedScriptNames);
+        AddRootTypeScriptAppHostDelegateScript(scripts, toolchain, relativeAppHostDirectory, "aspire:dev", ref preservedScriptNames);
+
+        return preservedScriptNames ?? [];
+    }
+
+    internal static IReadOnlyList<string> AddRootTypeScriptAppHostDelegateScripts(JsonObject scripts, DirectoryInfo appHostDirectory, string relativeAppHostDirectory, ILogger? logger)
+    {
+        var toolchain = TypeScriptAppHostToolchainResolver.Resolve(appHostDirectory, logger);
+        return AddRootTypeScriptAppHostDelegateScripts(scripts, toolchain, relativeAppHostDirectory);
     }
 
     internal static string SerializePackageJson(JsonObject packageJson, string existingContent)
@@ -353,6 +382,26 @@ internal sealed class ScaffoldingService : IScaffoldingService
         };
     }
 
+    private static void AddRootTypeScriptAppHostDelegateScript(JsonObject scripts, TypeScriptAppHostToolchain toolchain, string relativeAppHostDirectory, string scriptName, ref List<string>? preservedScriptNames)
+    {
+        var delegateScript = CreateRootDelegateScript(toolchain, relativeAppHostDirectory, scriptName);
+        if (scripts[scriptName] is JsonValue existingScriptValue &&
+            existingScriptValue.TryGetValue<string>(out var existingScript) &&
+            string.Equals(existingScript, delegateScript, StringComparison.Ordinal))
+        {
+            return;
+        }
+
+        if (scripts[scriptName] is not null)
+        {
+            preservedScriptNames ??= [];
+            preservedScriptNames.Add(scriptName);
+            return;
+        }
+
+        scripts[scriptName] = delegateScript;
+    }
+
     private async Task<int> InstallDependenciesAsync(
         DirectoryInfo directory,
         LanguageInfo language,
@@ -366,7 +415,7 @@ internal sealed class ScaffoldingService : IScaffoldingService
             runtimeSpec = TypeScriptAppHostToolchainResolver.ApplyToRuntimeSpec(runtimeSpec, toolchain);
         }
 
-        var runtime = new GuestRuntime(runtimeSpec, _logger);
+        var runtime = new GuestRuntime(runtimeSpec, _logger, PathLookupHelper.FindFullPathFromPath, _profilingTelemetry);
 
         var (initResult, initOutput) = await runtime.InitializeAsync(directory, cancellationToken);
         if (initResult != 0)

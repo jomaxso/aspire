@@ -3,7 +3,6 @@
 
 using System.CommandLine;
 using System.Globalization;
-using Aspire.Cli.Configuration;
 using Aspire.Cli.DotNet;
 using Aspire.Cli.Interaction;
 using Aspire.Cli.Packaging;
@@ -51,8 +50,8 @@ internal sealed class AddCommand : BaseCommand
         Description = AddCommandStrings.DiscoveryScopeOptionDescription
     };
 
-    public AddCommand(IInteractionService interactionService, IProjectLocator projectLocator, IntegrationPackageSearchService integrationPackageSearchService, IAddCommandPrompter prompter, AspireCliTelemetry telemetry, IDotNetSdkInstaller sdkInstaller, IDotNetCliRunner runner, IFeatures features, ICliUpdateNotifier updateNotifier, CliExecutionContext executionContext, ICliHostEnvironment hostEnvironment, IAppHostProjectFactory projectFactory, ProfilingTelemetry profilingTelemetry)
-        : base("add", AddCommandStrings.Description, features, updateNotifier, executionContext, interactionService, telemetry)
+    public AddCommand(IProjectLocator projectLocator, IntegrationPackageSearchService integrationPackageSearchService, IAddCommandPrompter prompter, IDotNetSdkInstaller sdkInstaller, IDotNetCliRunner runner, ICliHostEnvironment hostEnvironment, IAppHostProjectFactory projectFactory, ProfilingTelemetry profilingTelemetry, CommonCommandServices services)
+        : base("add", AddCommandStrings.Description, services)
     {
         _projectLocator = projectLocator;
         _integrationPackageSearchService = integrationPackageSearchService;
@@ -252,9 +251,17 @@ internal sealed class AddCommand : BaseCommand
                 }
             }
 
-            if (!filteredPackagesWithShortName.Any() && integrationName is not null && version is not null && !_hostEnvironment.SupportsInteractiveInput)
+            // Non-interactive mode never falls back to fuzzy search: in interactive mode the user picks
+            // from the fuzzy candidates, but a script/CI invocation would otherwise silently auto-select
+            // distinctPackages.First() in GetPackageByInteractiveFlow and install the wrong package
+            // (https://github.com/microsoft/aspire/issues/17724). Refusing with an actionable error
+            // forces the caller to supply an exact package id or friendly name.
+            if (filteredPackagesWithShortName.Count == 0 && integrationName is not null && !_hostEnvironment.SupportsInteractiveInput)
             {
-                throw new EmptyChoicesException(string.Format(CultureInfo.CurrentCulture, AddCommandStrings.SpecifiedVersionRequiresExactPackageMatch, integrationName));
+                var message = version is not null
+                    ? string.Format(CultureInfo.CurrentCulture, AddCommandStrings.SpecifiedVersionRequiresExactPackageMatch, integrationName)
+                    : string.Format(CultureInfo.CurrentCulture, AddCommandStrings.NonInteractiveRequiresExactPackageMatch, integrationName);
+                throw new EmptyChoicesException(message);
             }
 
             if (filteredPackagesWithShortName.Count == 0 && integrationName is not null)
@@ -275,23 +282,35 @@ internal sealed class AddCommand : BaseCommand
                     : ProfilingTelemetry.Values.AddPackageMatchKindNone;
             }
 
-            if (!filteredPackagesWithShortName.Any() && integrationName is not null && !_hostEnvironment.SupportsInteractiveInput)
-            {
-                InteractionService.DisplayError(string.Format(CultureInfo.CurrentCulture, AddCommandStrings.NoPackagesMatchedSearchTerm, integrationName));
-                return CommandResult.FromExitCode(CliExitCodes.FailedToAddPackage);
-            }
+            // If the user supplied a partial/fuzzy search term, keep the package prompt even when
+            // the fallback only found one candidate; otherwise `aspire add kube` can silently add
+            // the lone fuzzy match without asking the interactive user to confirm it.
+            var promptForSingleFuzzyPackage = packageMatchKind == ProfilingTelemetry.Values.AddPackageMatchKindFuzzy;
 
-            // If we didn't match any, show a complete list. If we matched one, and its
+            // If we didn't match any, show a complete list. If we matched one, and it's
             // an exact match, then we still prompt, but it will only prompt for
             // the version. If there is more than one match then we prompt.
             (string FriendlyName, NuGetPackage Package, PackageChannel Channel) selectedNuGetPackage;
             selectedNuGetPackage = filteredPackagesWithShortName.Count switch
             {
-                0 when integrationName is null => await GetPackageByInteractiveFlow(effectiveAppHostProjectFile.Directory!, packagesWithShortName, version, cancellationToken, forcePackageSelection: true),
-                0 => await GetPackageByInteractiveFlowWithNoMatchesMessage(effectiveAppHostProjectFile.Directory!, packagesWithShortName, integrationName, version, cancellationToken),
-                1 when filteredPackagesWithShortName[0].Package.Version == version
+                0 => await GetPackageByInteractiveFlowWithNoMatchesMessage(
+                    effectiveAppHostProjectFile.Directory!,
+                    packagesWithShortName,
+                    integrationName,
+                    version,
+                    configuredChannel,
+                    cancellationToken,
+                    promptForSinglePackage: true),
+                1 when packageMatchKind == ProfilingTelemetry.Values.AddPackageMatchKindExact
+                    && filteredPackagesWithShortName[0].Package.Version == version
                     => filteredPackagesWithShortName[0],
-                _ => await GetPackageByInteractiveFlow(effectiveAppHostProjectFile.Directory!, filteredPackagesWithShortName, version, cancellationToken)
+                _ => await GetPackageByInteractiveFlow(
+                    effectiveAppHostProjectFile.Directory!,
+                    filteredPackagesWithShortName,
+                    version,
+                    configuredChannel,
+                    cancellationToken,
+                    promptForSingleFuzzyPackage)
             };
             using (var selectPackageActivity = _profilingTelemetry.StartAddSelectPackage(integrationName, version))
             {
@@ -536,7 +555,7 @@ internal sealed class AddCommand : BaseCommand
             return null;
         }
 
-        if (VersionHelper.IsLocalBuildChannel(channel.Name))
+        if (VersionHelper.IsLocalBuildChannel(channel.Name) || channel.IsBackedByLocalPackageDirectory)
         {
             return null;
         }
@@ -554,7 +573,11 @@ internal sealed class AddCommand : BaseCommand
 
     private async Task EnsureLocalBuildChannelNuGetConfigAsync(string? requestedSource, PackageChannel channel, DirectoryInfo projectDirectory, CancellationToken cancellationToken)
     {
-        if (!string.IsNullOrEmpty(requestedSource) || !VersionHelper.IsLocalBuildChannel(channel.Name))
+        // When installing from a PR/local channel, ensure the project has access to the local
+        // package directory as a NuGet source so `dotnet add package` can resolve packages that
+        // are not available from the ambient feeds.
+        if (!string.IsNullOrEmpty(requestedSource) ||
+            (!VersionHelper.IsLocalBuildChannel(channel.Name) && !channel.IsBackedByLocalPackageDirectory))
         {
             return;
         }
@@ -686,18 +709,25 @@ internal sealed class AddCommand : BaseCommand
         return versions;
     }
 
-    private async Task<(string FriendlyName, NuGetPackage Package, PackageChannel Channel)> GetPackageByInteractiveFlow(DirectoryInfo workingDirectory, IEnumerable<(string FriendlyName, NuGetPackage Package, PackageChannel Channel)> possiblePackages, string? preferredVersion, CancellationToken cancellationToken, bool forcePackageSelection = false)
+    private async Task<(string FriendlyName, NuGetPackage Package, PackageChannel Channel)> GetPackageByInteractiveFlow(
+        DirectoryInfo workingDirectory,
+        IEnumerable<(string FriendlyName, NuGetPackage Package, PackageChannel Channel)> possiblePackages,
+        string? preferredVersion,
+        string? configuredChannel,
+        CancellationToken cancellationToken,
+        bool promptForSinglePackage = false)
     {
         var distinctPackages = possiblePackages.DistinctBy(p => p.Package.Id).ToArray();
 
-        // If there is only one package for a named integration, we can skip the package prompt and just use it.
-        // Without a named integration, still prompt so nothing is added without an explicit selection.
+        // Exact matches can skip the package prompt when one package remains. Fuzzy/no-match
+        // fallbacks opt into prompting so interactive users confirm the candidate first.
+        // In non-interactive mode, auto-select the first package.
         var selectedPackage = distinctPackages.Length switch
         {
-            1 when !forcePackageSelection => distinctPackages.First(),
+            1 when promptForSinglePackage && _hostEnvironment.SupportsInteractiveInput => await PromptForIntegrationAsync(distinctPackages, cancellationToken),
+            1 => distinctPackages.First(),
             > 1 when !_hostEnvironment.SupportsInteractiveInput => distinctPackages.First(),
             > 1 => await PromptForIntegrationAsync(distinctPackages, cancellationToken),
-            >= 1 => await PromptForIntegrationAsync(distinctPackages, cancellationToken),
             _ => throw new InvalidOperationException(AddCommandStrings.UnexpectedNumberOfPackagesFound)
         };
 
@@ -725,9 +755,12 @@ internal sealed class AddCommand : BaseCommand
             throw new EmptyChoicesException(string.Format(CultureInfo.CurrentCulture, AddCommandStrings.SpecifiedVersionNotFoundForPackage, selectedPackage.Package.Id, preferredVersion));
         }
 
-        var hasHives = ExecutionContext.GetHiveCount() > 0;
-        var localBuildPackageVersions = packageVersions
-            .Where(p => VersionHelper.IsLocalBuildChannel(p.Channel.Name))
+        // When PR hives are present, prefer the package that exactly matches the installed
+        // CLI/SDK version so template- and add-generated projects stay on the same build.
+        // IsBackedByLocalPackageDirectory also covers the ASPIRE_CLI_PACKAGES emulation case,
+        // where the local channel is named stable/daily/staging rather than a local-build name.
+        var prChannelPackageVersions = packageVersions
+            .Where(p => VersionHelper.IsLocalBuildChannel(p.Channel.Name) || p.Channel.IsBackedByLocalPackageDirectory)
             .ToArray();
 
         // When local build hives are present, prefer the package that exactly matches the
@@ -735,19 +768,28 @@ internal sealed class AddCommand : BaseCommand
         // build. Apply this before the interactive prompt so pressing Enter does not
         // accidentally downgrade to the implicit feed when a matching hive package exists.
         if (VersionHelper.TryGetCurrentCliVersionMatch(
-            localBuildPackageVersions,
+            prChannelPackageVersions,
             p => p.Package.Version,
+            ExecutionContext.IdentitySdkVersion,
             out var cliVersionPackage,
             channelName: null,
-            hasPrHives: hasHives))
+            hasPrHives: ExecutionContext.GetHiveCount() > 0 || ExecutionContext.IdentityPackagesDirectory is not null))
         {
             return cliVersionPackage;
         }
 
-        // Prefer the implicit/default channel first to keep package selection aligned with the
-        // project's configured feeds. Then select the latest version within the chosen channel.
+        // In non-interactive mode, prefer the channel the apphost has pinned (e.g. a polyglot
+        // apphost that persists `channel: daily` in aspire.config.json). When a channel is pinned,
+        // it reflects explicit user intent and must outrank the implicit/ambient channel — otherwise
+        // the implicit channel (which for polyglot apphosts just mirrors nuget.org) shadows the pinned
+        // feed and we auto-select a stable version the pinned feed can't restore, producing a hard
+        // restore failure. See https://github.com/microsoft/aspire/issues/18114 (the polyglot
+        // selection-path manifestation of the C#-only display bug https://github.com/microsoft/aspire/issues/17294).
+        // When no channel is pinned (the common C# case, where configuredChannel is null) we keep the prior behavior:
+        // implicit/default channel first, then latest version within the chosen channel.
         var orderedPackageVersions = packageVersions
-            .OrderByDescending(p => p.Channel.Type is PackageChannelType.Implicit)
+            .OrderByDescending(p => MatchesConfiguredChannel(p.Channel, configuredChannel))
+            .ThenByDescending(p => p.Channel.Type is PackageChannelType.Implicit)
             .ThenByDescending(p => SemVersion.Parse(p.Package.Version), SemVersion.PrecedenceComparer);
         if (!_hostEnvironment.SupportsInteractiveInput)
         {
@@ -755,9 +797,19 @@ internal sealed class AddCommand : BaseCommand
         }
 
         // ... otherwise we had better prompt.
-        var version = await PromptForIntegrationVersionAsync(orderedPackageVersions, cancellationToken);
+        var version = await PromptForIntegrationVersionAsync(orderedPackageVersions, configuredChannel, cancellationToken);
 
         return version;
+    }
+
+    // A package "matches" the pinned channel when the apphost pinned an explicit channel name and the
+    // package was discovered from the explicit channel of that name (case-insensitive). The implicit
+    // channel never matches because it has no stable name to pin against.
+    private static bool MatchesConfiguredChannel(PackageChannel channel, string? configuredChannel)
+    {
+        return !string.IsNullOrEmpty(configuredChannel)
+            && channel.Type is PackageChannelType.Explicit
+            && string.Equals(channel.Name, configuredChannel, StringComparisons.ChannelName);
     }
 
     private async Task<(string FriendlyName, NuGetPackage Package, PackageChannel Channel)> PromptForIntegrationAsync(IEnumerable<(string FriendlyName, NuGetPackage Package, PackageChannel Channel)> packages, CancellationToken cancellationToken)
@@ -766,20 +818,27 @@ internal sealed class AddCommand : BaseCommand
         return await _prompter.PromptForIntegrationAsync(packages, cancellationToken);
     }
 
-    private async Task<(string FriendlyName, NuGetPackage Package, PackageChannel Channel)> PromptForIntegrationVersionAsync(IEnumerable<(string FriendlyName, NuGetPackage Package, PackageChannel Channel)> packages, CancellationToken cancellationToken)
+    private async Task<(string FriendlyName, NuGetPackage Package, PackageChannel Channel)> PromptForIntegrationVersionAsync(IEnumerable<(string FriendlyName, NuGetPackage Package, PackageChannel Channel)> packages, string? configuredChannel, CancellationToken cancellationToken)
     {
         using var promptActivity = _profilingTelemetry.StartAddSelectPackagePrompt();
-        return await _prompter.PromptForIntegrationVersionAsync(packages, cancellationToken);
+        return await _prompter.PromptForIntegrationVersionAsync(packages, configuredChannel, cancellationToken);
     }
 
-    private async Task<(string FriendlyName, NuGetPackage Package, PackageChannel Channel)> GetPackageByInteractiveFlowWithNoMatchesMessage(DirectoryInfo workingDirectory, IEnumerable<(string FriendlyName, NuGetPackage Package, PackageChannel Channel)> possiblePackages, string? searchTerm, string? preferredVersion, CancellationToken cancellationToken)
+    private async Task<(string FriendlyName, NuGetPackage Package, PackageChannel Channel)> GetPackageByInteractiveFlowWithNoMatchesMessage(
+        DirectoryInfo workingDirectory,
+        IEnumerable<(string FriendlyName, NuGetPackage Package, PackageChannel Channel)> possiblePackages,
+        string? searchTerm,
+        string? preferredVersion,
+        string? configuredChannel,
+        CancellationToken cancellationToken,
+        bool promptForSinglePackage = false)
     {
         if (searchTerm is not null)
         {
             InteractionService.DisplaySubtleMessage(string.Format(CultureInfo.CurrentCulture, AddCommandStrings.NoPackagesMatchedSearchTerm, searchTerm));
         }
 
-        return await GetPackageByInteractiveFlow(workingDirectory, possiblePackages, preferredVersion, cancellationToken);
+        return await GetPackageByInteractiveFlow(workingDirectory, possiblePackages, preferredVersion, configuredChannel, cancellationToken, promptForSinglePackage);
     }
 
 }
@@ -787,12 +846,12 @@ internal sealed class AddCommand : BaseCommand
 internal interface IAddCommandPrompter
 {
     Task<(string FriendlyName, NuGetPackage Package, PackageChannel Channel)> PromptForIntegrationAsync(IEnumerable<(string FriendlyName, NuGetPackage Package, PackageChannel Channel)> packages, CancellationToken cancellationToken);
-    Task<(string FriendlyName, NuGetPackage Package, PackageChannel Channel)> PromptForIntegrationVersionAsync(IEnumerable<(string FriendlyName, NuGetPackage Package, PackageChannel Channel)> packages, CancellationToken cancellationToken);
+    Task<(string FriendlyName, NuGetPackage Package, PackageChannel Channel)> PromptForIntegrationVersionAsync(IEnumerable<(string FriendlyName, NuGetPackage Package, PackageChannel Channel)> packages, string? configuredChannel, CancellationToken cancellationToken);
 }
 
 internal class AddCommandPrompter(IInteractionService interactionService) : IAddCommandPrompter
 {
-    public virtual async Task<(string FriendlyName, NuGetPackage Package, PackageChannel Channel)> PromptForIntegrationVersionAsync(IEnumerable<(string FriendlyName, NuGetPackage Package, PackageChannel Channel)> packages, CancellationToken cancellationToken)
+    public virtual async Task<(string FriendlyName, NuGetPackage Package, PackageChannel Channel)> PromptForIntegrationVersionAsync(IEnumerable<(string FriendlyName, NuGetPackage Package, PackageChannel Channel)> packages, string? configuredChannel, CancellationToken cancellationToken)
     {
         var firstPackage = packages.First();
 
@@ -846,7 +905,28 @@ internal class AddCommandPrompter(IInteractionService interactionService) : IAdd
             return implicitGroup.HighestVersion;
         }
 
+        // Build the root menu. When the apphost has pinned a channel (e.g. a polyglot apphost that
+        // persists `channel: daily` in aspire.config.json), surface that channel's package as the first
+        // option so it becomes the default selection — the pinned channel reflects explicit user intent
+        // and its feed is the one the project will actually restore from. Otherwise the implicit/ambient
+        // channel can shadow the pinned feed and offer a version the project can't restore. See
+        // https://github.com/microsoft/aspire/issues/18114.
         var rootChoices = new List<(string Label, Func<CancellationToken, Task<(string FriendlyName, NuGetPackage Package, PackageChannel Channel)>> Action)>();
+
+        var configuredGroup = string.IsNullOrEmpty(configuredChannel)
+            ? null
+            : explicitGroups.FirstOrDefault(g => string.Equals(g.Channel.Name, configuredChannel, StringComparisons.ChannelName));
+
+        if (configuredGroup is not null)
+        {
+            var channel = configuredGroup.Channel;
+            var item = configuredGroup.HighestVersion;
+
+            rootChoices.Add((
+                Label: channel.Name.EscapeMarkup(),
+                Action: ct => PromptForChannelPackagesAsync(channel, new[] { item }, ct)
+            ));
+        }
 
         if (implicitGroup is not null)
         {
@@ -858,6 +938,12 @@ internal class AddCommandPrompter(IInteractionService interactionService) : IAdd
 
         foreach (var channelGroup in explicitGroups)
         {
+            // The pinned channel (if any) was already added above as the first/default choice.
+            if (ReferenceEquals(channelGroup, configuredGroup))
+            {
+                continue;
+            }
+
             var channel = channelGroup.Channel;
             var item = channelGroup.HighestVersion;
 

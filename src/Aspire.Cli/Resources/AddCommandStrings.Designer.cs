@@ -437,6 +437,14 @@ namespace Aspire.Cli.Resources {
             }
         }
 
+        public static string NonInteractiveRequiresExactPackageMatch
+        {
+            get
+            {
+                return ResourceManager.GetString("NonInteractiveRequiresExactPackageMatch", resourceCulture);
+            }
+        }
+
         public static string UsePrereleasePackages
         {
             get

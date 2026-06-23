@@ -4,12 +4,10 @@
 using System.CommandLine;
 using System.Globalization;
 using System.Text.Json;
-using Aspire.Cli.Configuration;
 using Aspire.Cli.Interaction;
 using Aspire.Cli.Packaging;
 using Aspire.Cli.Projects;
 using Aspire.Cli.Resources;
-using Aspire.Cli.Telemetry;
 using Aspire.Cli.Utils;
 using Spectre.Console;
 using Spectre.Console.Rendering;
@@ -34,12 +32,8 @@ internal abstract class IntegrationDiscoveryCommand : BaseCommand
         string name,
         string description,
         IntegrationPackageSearchService integrationPackageSearchService,
-        IInteractionService interactionService,
-        IFeatures features,
-        ICliUpdateNotifier updateNotifier,
-        CliExecutionContext executionContext,
-        AspireCliTelemetry telemetry)
-        : base(name, description, features, updateNotifier, executionContext, interactionService, telemetry)
+        CommonCommandServices services)
+        : base(name, description, services)
     {
         _integrationPackageSearchService = integrationPackageSearchService;
 
@@ -213,12 +207,8 @@ internal sealed class IntegrationListCommand : IntegrationDiscoveryCommand
 {
     public IntegrationListCommand(
         IntegrationPackageSearchService integrationPackageSearchService,
-        IInteractionService interactionService,
-        IFeatures features,
-        ICliUpdateNotifier updateNotifier,
-        CliExecutionContext executionContext,
-        AspireCliTelemetry telemetry)
-        : base("list", AddCommandStrings.IntegrationListDescription, integrationPackageSearchService, interactionService, features, updateNotifier, executionContext, telemetry)
+        CommonCommandServices services)
+        : base("list", AddCommandStrings.IntegrationListDescription, integrationPackageSearchService, services)
     {
     }
 
@@ -235,12 +225,8 @@ internal sealed class IntegrationSearchCommand : IntegrationDiscoveryCommand
 
     public IntegrationSearchCommand(
         IntegrationPackageSearchService integrationPackageSearchService,
-        IInteractionService interactionService,
-        IFeatures features,
-        ICliUpdateNotifier updateNotifier,
-        CliExecutionContext executionContext,
-        AspireCliTelemetry telemetry)
-        : base("search", AddCommandStrings.IntegrationSearchDescription, integrationPackageSearchService, interactionService, features, updateNotifier, executionContext, telemetry)
+        CommonCommandServices services)
+        : base("search", AddCommandStrings.IntegrationSearchDescription, integrationPackageSearchService, services)
     {
         Arguments.Add(_queryArgument);
     }

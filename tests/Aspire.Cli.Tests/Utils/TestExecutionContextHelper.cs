@@ -20,13 +20,19 @@ internal static class TestExecutionContextHelper
         this TemporaryWorkspace workspace,
         string identityChannel = "local",
         IReadOnlyDictionary<string, string?>? environmentVariables = null,
-        string? logFilePath = null)
+        string? logFilePath = null,
+        string? identityVersion = null,
+        string? identityCommit = null,
+        bool identityOverridden = false)
     {
         return CreateExecutionContext(
             workspace.WorkspaceRoot,
             identityChannel: identityChannel,
-            environmentVariables: environmentVariables,
-            logFilePath: logFilePath);
+            environment: new TestEnvironment(environmentVariables),
+            logFilePath: logFilePath,
+            identityVersion: identityVersion,
+            identityCommit: identityCommit,
+            identityOverridden: identityOverridden);
     }
 
     /// <summary>
@@ -39,10 +45,14 @@ internal static class TestExecutionContextHelper
         string identityChannel = "local",
         DirectoryInfo? homeDirectory = null,
         DirectoryInfo? hivesDirectory = null,
-        IReadOnlyDictionary<string, string?>? environmentVariables = null,
+        IEnvironment? environment = null,
         DirectoryInfo? packagesDirectory = null,
         bool debugMode = false,
-        string? logFilePath = null)
+        string? logFilePath = null,
+        string? identityVersion = null,
+        string? identityCommit = null,
+        bool identityOverridden = false,
+        DirectoryInfo? identityPackagesDirectory = null)
     {
         var root = rootDirectory.FullName;
         hivesDirectory ??= new DirectoryInfo(Path.Combine(root, ".aspire", "hives"));
@@ -59,10 +69,15 @@ internal static class TestExecutionContextHelper
             sdksDirectory,
             logsDirectory,
             logFilePath,
+            identityChannel: identityChannel,
+            identityVersion: identityVersion,
+            identityCommit: identityCommit,
+            nugetServiceIndexOverride: null,
+            identityOverridden: identityOverridden,
+            identityPackagesDirectory: identityPackagesDirectory,
             debugMode: debugMode,
-            environmentVariables: environmentVariables,
+            environmentVariables: (environment as TestEnvironment)?.Variables,
             homeDirectory: homeDirectory,
-            packagesDirectory: packagesDirectory,
-            identityChannel: identityChannel);
+            packagesDirectory: packagesDirectory);
     }
 }

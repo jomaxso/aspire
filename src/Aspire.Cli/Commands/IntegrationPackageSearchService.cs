@@ -46,7 +46,8 @@ internal sealed class IntegrationPackageSearchService(
                     !DeprecatedPackages.IsDeprecated(packageId),
                 ct)).ToArray();
 
-            if (discoveryScope is not IntegrationDiscoveryScope.ThirdParty && VersionHelper.IsLocalBuildChannel(channel.Name))
+            if (discoveryScope is not IntegrationDiscoveryScope.ThirdParty &&
+                (VersionHelper.IsLocalBuildChannel(channel.Name) || channel.IsBackedByLocalPackageDirectory))
             {
                 // PR/local hive channels can expose Aspire.Hosting packages only as local .nupkg
                 // files, and `dotnet package search Aspire.Hosting` does not reliably surface
@@ -271,16 +272,28 @@ internal sealed class IntegrationPackageSearchService(
         // gated channels like "staging" before we filter the results below.
         var allChannels = await packagingService.GetChannelsAsync(cancellationToken, configuredChannel);
 
-        if (!string.IsNullOrEmpty(configuredChannel))
-        {
-            allChannels = allChannels.Where(c => string.Equals(c.Name, configuredChannel, StringComparison.OrdinalIgnoreCase));
-        }
-
-        var hasHives = executionContext.GetHiveCount() > 0;
+        // Channels included in the search:
+        //   * Implicit channel: always.
+        //   * Stable explicit channel: when no apphost channel is pinned, so third-party
+        //     discovery can still search NuGet.org even if the ambient NuGet.config points
+        //     at private feeds only.
+        //   * All explicit channels: when PR hives exist, ASPIRE_CLI_PACKAGES/sidecar packages
+        //     points Aspire packages at a local directory, or the apphost pinned a channel.
+        //
+        // What this method MUST NOT do is narrow the explicit channel set to just the pinned
+        // channel. That was the root cause of https://github.com/microsoft/aspire/issues/17724
+        // and https://github.com/microsoft/aspire/issues/17725: a TS apphost pinned to a
+        // Quality.Stable channel ended up with prerelease=false queries everywhere and
+        // prerelease-only packages became invisible.
+        var hasHives = executionContext.GetHiveCount() > 0 || executionContext.IdentityPackagesDirectory is not null;
+        var includeStableThirdPartyChannel = discoveryScope is not IntegrationDiscoveryScope.Official;
         var channels = (hasHives || !string.IsNullOrEmpty(configuredChannel)
             ? allChannels
-            : allChannels.Where(c => c.Type is PackageChannelType.Implicit ||
-                string.Equals(c.Name, PackageChannelNames.Stable, StringComparison.OrdinalIgnoreCase)))
+            : allChannels.Where(c =>
+                c.Type is PackageChannelType.Implicit ||
+                (includeStableThirdPartyChannel &&
+                    string.Equals(c.Name, PackageChannelNames.Stable, StringComparison.OrdinalIgnoreCase)))
+            )
             .ToArray();
 
         var configuredThirdPartyChannels = GetConfiguredThirdPartyChannels(workingDirectory, configuredChannel, discoveryScope);

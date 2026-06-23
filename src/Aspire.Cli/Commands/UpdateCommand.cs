@@ -11,7 +11,6 @@ using Aspire.Cli.Interaction;
 using Aspire.Cli.Packaging;
 using Aspire.Cli.Projects;
 using Aspire.Cli.Resources;
-using Aspire.Cli.Telemetry;
 using Aspire.Cli.Utils;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Logging;
@@ -57,22 +56,18 @@ internal sealed class UpdateCommand : BaseCommand
         IAppHostProjectFactory projectFactory,
         ILogger<UpdateCommand> logger,
         ICliDownloader? cliDownloader,
-        IInteractionService interactionService,
-        IFeatures features,
-        ICliUpdateNotifier updateNotifier,
-        CliExecutionContext executionContext,
         IConfigurationService configurationService,
-        AspireCliTelemetry telemetry,
-        IConfiguration configuration)
-        : base("update", UpdateCommandStrings.Description, features, updateNotifier, executionContext, interactionService, telemetry)
+        IConfiguration configuration,
+        CommonCommandServices services)
+        : base("update", UpdateCommandStrings.Description, services)
     {
         _projectLocator = projectLocator;
         _packagingService = packagingService;
         _projectFactory = projectFactory;
         _logger = logger;
         _cliDownloader = cliDownloader;
-        _updateNotifier = updateNotifier;
-        _features = features;
+        _updateNotifier = services.UpdateNotifier;
+        _features = services.Features;
         _configurationService = configurationService;
         _configuration = configuration;
 
@@ -110,6 +105,11 @@ internal sealed class UpdateCommand : BaseCommand
         return DotNetToolDetection.GetDotNetToolUpdateCommand();
     }
 
+    private static string? GetNpmUpdateCommand()
+    {
+        return NpmInstallDetection.GetNpmUpdateCommand();
+    }
+
     protected override async Task<CommandResult> ExecuteAsync(ParseResult parseResult, CancellationToken cancellationToken)
     {
         var isSelfUpdate = parseResult.GetValue(s_selfOption);
@@ -126,6 +126,17 @@ internal sealed class UpdateCommand : BaseCommand
                 return CommandResult.FromExitCode(0);
             }
 
+            // When running from a global npm install, defer to npm rather than overwriting
+            // npm-owned files with the GitHub-binary downloader. Detected via env vars the
+            // npm launcher (eng/clipack/npm/aspire.js) sets when spawning the native binary.
+            var npmUpdateCommand = GetNpmUpdateCommand();
+            if (npmUpdateCommand is not null)
+            {
+                InteractionService.DisplayMessage(KnownEmojis.Information, UpdateCommandStrings.NpmSelfUpdateMessage);
+                InteractionService.DisplayPlainText($"  {npmUpdateCommand}");
+                return CommandResult.Success();
+            }
+
             if (_cliDownloader is null)
             {
                 return CommandResult.Failure(CliExitCodes.InvalidCommand, "CLI self-update is not available in this environment.");
@@ -133,7 +144,7 @@ internal sealed class UpdateCommand : BaseCommand
 
             try
             {
-                return await ExecuteSelfUpdateAsync(parseResult, cancellationToken);
+                return await ExecuteSelfUpdateAsync(parseResult, null, cancellationToken);
             }
             catch (OperationCanceledException)
             {
@@ -340,8 +351,16 @@ internal sealed class UpdateCommand : BaseCommand
                         return CommandResult.Success();
                     }
 
+                    var npmUpdateCommand = GetNpmUpdateCommand();
+                    if (npmUpdateCommand is not null)
+                    {
+                        InteractionService.DisplayMessage(KnownEmojis.Information, UpdateCommandStrings.NpmSelfUpdateMessage);
+                        InteractionService.DisplayPlainText($"  {npmUpdateCommand}");
+                        return CommandResult.Success();
+                    }
+
                     // Use the same channel that was selected for the project update
-                    return await ExecuteSelfUpdateAsync(parseResult, cancellationToken, channel.Name);
+                    return await ExecuteSelfUpdateAsync(parseResult, channel.Name, cancellationToken);
                 }
             }
         }
@@ -362,8 +381,11 @@ internal sealed class UpdateCommand : BaseCommand
             // Check if this is a "no project found" error and prompt for self-update
             if (string.Equals(ex.Message, ErrorStrings.NoProjectFileFound, StringComparisons.CliInputOrOutput))
             {
-                // Only prompt for self-update if not running as dotnet tool and downloader is available
-                if (GetDotNetToolUpdateCommand() is null && _cliDownloader is not null)
+                // Only prompt for self-update when we can actually perform it: not as a
+                // dotnet tool, not from an npm install, and the GitHub-binary downloader
+                // is wired up. Otherwise the downloader would overwrite package-manager-owned
+                // files instead of letting the package manager handle the update.
+                if (GetDotNetToolUpdateCommand() is null && GetNpmUpdateCommand() is null && _cliDownloader is not null)
                 {
                     var shouldUpdateCli = await InteractionService.PromptConfirmAsync(
                         UpdateCommandStrings.NoAppHostFoundUpdateCliPrompt,
@@ -372,7 +394,7 @@ internal sealed class UpdateCommand : BaseCommand
 
                     if (shouldUpdateCli)
                     {
-                        return await ExecuteSelfUpdateAsync(parseResult, cancellationToken);
+                        return await ExecuteSelfUpdateAsync(parseResult, null, cancellationToken);
                     }
                 }
             }
@@ -405,7 +427,7 @@ internal sealed class UpdateCommand : BaseCommand
 
         var targetSdkVersion = await GetLatestGuestSdkVersionAsync(channel, projectDirectory, cancellationToken);
         if (targetSdkVersion is null ||
-            !SemVersion.TryParse(VersionHelper.GetDefaultSdkVersion(), SemVersionStyles.Strict, out var currentCliVersion) ||
+            !SemVersion.TryParse(ExecutionContext.IdentitySdkVersion, SemVersionStyles.Strict, out var currentCliVersion) ||
             SemVersion.PrecedenceComparer.Compare(targetSdkVersion, currentCliVersion) <= 0)
         {
             return null;
@@ -430,7 +452,16 @@ internal sealed class UpdateCommand : BaseCommand
             return CommandResult.Success();
         }
 
-        var selfUpdateResult = await ExecuteSelfUpdateAsync(parseResult, cancellationToken, channel.Name);
+        var npmUpdateCommand = GetNpmUpdateCommand();
+        if (npmUpdateCommand is not null)
+        {
+            InteractionService.DisplayMessage(KnownEmojis.Information, UpdateCommandStrings.NpmSelfUpdateMessage);
+            InteractionService.DisplayPlainText($"  {npmUpdateCommand}");
+            InteractionService.DisplayMessage(KnownEmojis.Information, UpdateCommandStrings.ProjectUpdateSkippedAfterCliUpdateMessage);
+            return CommandResult.Success();
+        }
+
+        var selfUpdateResult = await ExecuteSelfUpdateAsync(parseResult, channel.Name, cancellationToken);
         if (selfUpdateResult.ExitCode == CliExitCodes.Success)
         {
             InteractionService.DisplayMessage(KnownEmojis.Information, UpdateCommandStrings.ProjectUpdateSkippedAfterCliUpdateMessage);
@@ -465,7 +496,7 @@ internal sealed class UpdateCommand : BaseCommand
             || string.Equals(ExecutionContext.IdentityChannel, PackageChannelNames.Staging, StringComparisons.ChannelName);
     }
 
-    private async Task<CommandResult> ExecuteSelfUpdateAsync(ParseResult parseResult, CancellationToken cancellationToken, string? selectedChannel = null)
+    private async Task<CommandResult> ExecuteSelfUpdateAsync(ParseResult parseResult, string? selectedChannel, CancellationToken cancellationToken)
     {
         var channel = selectedChannel ?? parseResult.GetValue(_channelOption) ?? parseResult.GetValue(_qualityOption);
 
@@ -479,13 +510,41 @@ internal sealed class UpdateCommand : BaseCommand
             var channels = isStagingEnabled
                 ? new[] { PackageChannelNames.Stable, PackageChannelNames.Staging, PackageChannelNames.Daily }
                 : new[] { PackageChannelNames.Stable, PackageChannelNames.Daily };
-            var channelBinding = PromptBinding.Create(parseResult, _channelOption);
-            channel = await InteractionService.PromptForSelectionAsync(
-                "Select the channel to update to:",
-                channels,
-                q => q,
-                binding: channelBinding,
-                cancellationToken: cancellationToken);
+
+            // In non-interactive mode, avoid prompting. Prefer the CLI identity channel when it
+            // maps to an update channel; use stable for local dev builds; otherwise require --channel.
+            var nonInteractive = parseResult.GetValue(RootCommand.NonInteractiveOption);
+            if (nonInteractive)
+            {
+                var identityChannel = ExecutionContext.IdentityChannel;
+                if (!string.IsNullOrWhiteSpace(identityChannel)
+                    && !string.Equals(identityChannel, PackageChannelNames.Local, StringComparisons.ChannelName)
+                    && channels.FirstOrDefault(c => string.Equals(c, identityChannel, StringComparisons.ChannelName)) is { } matchedChannel)
+                {
+                    channel = matchedChannel;
+                }
+                else if (string.Equals(identityChannel, PackageChannelNames.Local, StringComparisons.ChannelName))
+                {
+                    channel = PackageChannelNames.Stable;
+                }
+                else
+                {
+                    var channelOptionDisplayName = $"'{_channelOption.Name}'";
+                    InteractionService.DisplayError(
+                        string.Format(CultureInfo.CurrentCulture, InteractionServiceStrings.NonInteractiveOptionRequired, channelOptionDisplayName));
+                    throw new NonInteractiveException(channelOptionDisplayName);
+                }
+            }
+            else
+            {
+                var channelBinding = PromptBinding.Create(parseResult, _channelOption);
+                channel = await InteractionService.PromptForSelectionAsync(
+                    "Select the channel to update to:",
+                    channels,
+                    q => q,
+                    binding: channelBinding,
+                    cancellationToken: cancellationToken);
+            }
         }
 
         try

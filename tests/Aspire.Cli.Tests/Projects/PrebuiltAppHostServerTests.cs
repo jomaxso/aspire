@@ -11,8 +11,10 @@ using Aspire.Cli.Projects;
 using Aspire.Cli.Tests.Mcp;
 using Aspire.Cli.Tests.TestServices;
 using Aspire.Cli.Tests.Utils;
+using Aspire.Cli.Utils;
 using Aspire.Hosting;
 using Aspire.Shared;
+using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Logging.Abstractions;
 
 namespace Aspire.Cli.Tests.Projects;
@@ -418,13 +420,18 @@ public class PrebuiltAppHostServerTests(ITestOutputHelper outputHelper)
     {
         // Pins the rubber-duck finding: dropping the temp config also drops the staging-specific
         // global packages folder. The emitted nuget.config must contain a <config> element with a
-        // globalPackagesFolder setting when the channel was built with configureGlobalPackagesFolder.
+        // globalPackagesFolder setting when the channel was built with configureGlobalPackagesFolder,
+        // AND the value must be an absolute path that lives outside the temp config's own directory
+        // so the cached packages survive the temp config's recursive cleanup (otherwise restore
+        // hands BundleNuGetService manifest paths that the temp dispose just deleted, hanging
+        // aspire-managed during DI / assembly loading on macOS osx-arm64 polyglot staging builds).
         using var workspace = TemporaryWorkspace.Create(outputHelper);
 
         var executionContext = CreateContextWithIdentityChannel("local");
+        const string channelSource = "https://pkgs.dev.azure.com/fake/v3/index.json";
         var mappings = new[]
         {
-            new PackageMapping(PackageMapping.AllPackages, "https://pkgs.dev.azure.com/fake/v3/index.json")
+            new PackageMapping(PackageMapping.AllPackages, channelSource)
         };
         var stagingChannel = PackageChannel.CreateExplicitChannel(
             name: "staging",
@@ -432,6 +439,7 @@ public class PrebuiltAppHostServerTests(ITestOutputHelper outputHelper)
             mappings: mappings,
             nuGetPackageCache: new FakeNuGetPackageCache(),
             features: new TestFeatures(),
+            NullLogger.Instance,
             configureGlobalPackagesFolder: true);
         var server = CreateServerWithChannel(workspace, stagingChannel, executionContext);
 
@@ -443,7 +451,81 @@ public class PrebuiltAppHostServerTests(ITestOutputHelper outputHelper)
             .SelectMany(c => c.Elements("add"))
             .FirstOrDefault(a => string.Equals(a.Attribute("key")?.Value, "globalPackagesFolder", StringComparison.OrdinalIgnoreCase));
         Assert.NotNull(gpf);
-        Assert.False(string.IsNullOrEmpty(gpf.Attribute("value")?.Value));
+        var gpfValue = gpf.Attribute("value")?.Value;
+        Assert.False(string.IsNullOrEmpty(gpfValue));
+        Assert.True(Path.IsPathFullyQualified(gpfValue), $"globalPackagesFolder value must be an absolute path. Got: {gpfValue}");
+        // The temp config directory is recursively deleted on dispose; the cache must live elsewhere
+        // so manifest paths produced by BundleNuGetService remain valid for the AppHost's lifetime.
+        var tempConfigDir = result.ConfigFile.Directory!.FullName;
+        Assert.False(
+            gpfValue!.StartsWith(tempConfigDir, StringComparison.Ordinal),
+            $"globalPackagesFolder must not be under the temp nuget.config dir '{tempConfigDir}'. Got: {gpfValue}");
+        // The cache subdirectory must be keyed by the resolved feed URL so two different staging
+        // feeds (e.g. two darc builds or an overrideStagingFeed setting) get distinct caches.
+        var expectedCacheKey = CliPathHelper.ComputeStagingFeedCacheKey(channelSource);
+        Assert.NotNull(expectedCacheKey);
+        var expectedCachePath = Path.Combine(
+            CliPathHelper.GetStagingNuGetPackagesDirectory(executionContext.AspireHomeDirectory),
+            expectedCacheKey);
+        Assert.Equal(expectedCachePath, gpfValue);
+    }
+
+    [Fact]
+    public async Task TryCreateTemporaryNuGetConfig_StagingRequested_FromRealPackagingService_EmitsStableGlobalPackagesFolderOutsideTempDir()
+    {
+        // End-to-end pin for the staging temp-config hang fix: when the real PackagingService
+        // synthesizes the staging channel (here driven by overrideStagingFeed on a stable-shaped
+        // CLI so configureGlobalPackagesFolder lands true), the temporary nuget.config used by
+        // PrebuiltAppHostServer must point globalPackagesFolder at an absolute path that survives
+        // the TemporaryNuGetConfig.Dispose recursive delete. Otherwise BundleNuGetService restores
+        // staging assemblies into <temp>/.nugetpackages, bakes those paths into
+        // integration-package-probe-manifest.json, and aspire-managed hangs in DI/assembly loading
+        // when it later probes the (now deleted) paths — observed on macOS osx-arm64.
+        using var workspace = TemporaryWorkspace.Create(outputHelper);
+
+        const string overrideStagingFeed = "https://pkgs.dev.azure.com/dnceng/internal/_packaging/darc-pub-microsoft-aspire-deadbeef/nuget/v3/index.json";
+        var executionContext = TestExecutionContextHelper.CreateExecutionContext(
+            workspace,
+            identityChannel: PackageChannelNames.Staging);
+        var configuration = new ConfigurationBuilder()
+            .AddInMemoryCollection(new Dictionary<string, string?>
+            {
+                [PackagingService.OverrideStagingFeedConfigKey] = overrideStagingFeed
+            })
+            .Build();
+        var packagingService = new PackagingService(
+            executionContext,
+            new FakeNuGetPackageCache(),
+            new TestFeatures(),
+            configuration,
+            NullLogger<PackagingService>.Instance,
+            isStableShapedCliVersion: () => true);
+
+        var server = CreateServerWithPackagingService(workspace, packagingService, executionContext);
+
+        using var result = await InvokeTryCreateTemporaryNuGetConfigAsync(server, PackageChannelNames.Staging);
+
+        Assert.NotNull(result);
+        var doc = XDocument.Load(result.ConfigFile.FullName);
+        var gpf = doc.Descendants("config")
+            .SelectMany(c => c.Elements("add"))
+            .FirstOrDefault(a => string.Equals(a.Attribute("key")?.Value, "globalPackagesFolder", StringComparison.OrdinalIgnoreCase));
+        Assert.NotNull(gpf);
+        var gpfValue = gpf.Attribute("value")?.Value;
+        Assert.False(string.IsNullOrEmpty(gpfValue));
+        Assert.True(Path.IsPathFullyQualified(gpfValue), $"globalPackagesFolder value must be an absolute path. Got: {gpfValue}");
+        var tempConfigDir = result.ConfigFile.Directory!.FullName;
+        Assert.False(
+            gpfValue!.StartsWith(tempConfigDir, StringComparison.Ordinal),
+            $"globalPackagesFolder must not be under the temp nuget.config dir '{tempConfigDir}'. Got: {gpfValue}");
+        // The cache key is derived from the resolved staging feed URL so the same CLI talking to
+        // a different overrideStagingFeed gets a different cache bucket.
+        var expectedCacheKey = CliPathHelper.ComputeStagingFeedCacheKey(overrideStagingFeed);
+        Assert.NotNull(expectedCacheKey);
+        var expectedCachePath = Path.Combine(
+            CliPathHelper.GetStagingNuGetPackagesDirectory(executionContext.AspireHomeDirectory),
+            expectedCacheKey);
+        Assert.Equal(expectedCachePath, gpfValue);
     }
 
     [Theory]
@@ -504,7 +586,7 @@ public class PrebuiltAppHostServerTests(ITestOutputHelper outputHelper)
                 new PackageMapping(PackageMapping.AllPackages, NuGetOrgSource)
             ],
             nuGetPackageCache: new FakeNuGetPackageCache(),
-            features: new TestFeatures());
+            features: new TestFeatures(), NullLogger.Instance);
         var server = CreateServerWithChannel(workspace, explicitChannel, CreateContextWithIdentityChannel("pr-12345"));
 
         using var result = await InvokeTryCreateTemporaryNuGetConfigAsync(
@@ -531,8 +613,10 @@ public class PrebuiltAppHostServerTests(ITestOutputHelper outputHelper)
             mappings: [new PackageMapping("CommunityToolkit*", channelSource)],
             nuGetPackageCache: new FakeNuGetPackageCache(),
             features: new TestFeatures(),
+            NullLogger.Instance,
             configureGlobalPackagesFolder: true);
-        var server = CreateServerWithChannel(workspace, stagingChannel, CreateContextWithIdentityChannel("pr-12345"));
+        var executionContext = CreateContextWithIdentityChannel("pr-12345");
+        var server = CreateServerWithChannel(workspace, stagingChannel, executionContext);
 
         using var result = await InvokeTryCreateTemporaryNuGetConfigAsync(
             server,
@@ -544,9 +628,27 @@ public class PrebuiltAppHostServerTests(ITestOutputHelper outputHelper)
         Assert.Equal(["Aspire*"], GetPackagePatternsForSource(doc, packageSourceOverride));
         Assert.Equal(["CommunityToolkit*"], GetPackagePatternsForSource(doc, channelSource));
         Assert.Equal([PackageMapping.AllPackages], GetPackagePatternsForSource(doc, NuGetOrgSource));
-        Assert.NotNull(doc.Descendants("config")
+        var gpf = doc.Descendants("config")
             .SelectMany(c => c.Elements("add"))
-            .FirstOrDefault(a => string.Equals(a.Attribute("key")?.Value, "globalPackagesFolder", StringComparison.OrdinalIgnoreCase)));
+            .FirstOrDefault(a => string.Equals(a.Attribute("key")?.Value, "globalPackagesFolder", StringComparison.OrdinalIgnoreCase));
+        Assert.NotNull(gpf);
+        // Same stability requirement as the channel-only branch: the override path must outlive
+        // the temp nuget.config so BundleNuGetService's manifest paths remain valid after dispose.
+        var gpfValue = gpf.Attribute("value")?.Value;
+        Assert.False(string.IsNullOrEmpty(gpfValue));
+        Assert.True(Path.IsPathFullyQualified(gpfValue), $"globalPackagesFolder value must be an absolute path. Got: {gpfValue}");
+        var tempConfigDir = result.ConfigFile.Directory!.FullName;
+        Assert.False(
+            gpfValue!.StartsWith(tempConfigDir, StringComparison.Ordinal),
+            $"globalPackagesFolder must not be under the temp nuget.config dir '{tempConfigDir}'. Got: {gpfValue}");
+        // The cache key is derived from the --source override, not the channel's own mappings,
+        // so users running multiple overrides against the same CLI get distinct cache buckets.
+        var expectedCacheKey = CliPathHelper.ComputeStagingFeedCacheKey(packageSourceOverride);
+        Assert.NotNull(expectedCacheKey);
+        var expectedCachePath = Path.Combine(
+            CliPathHelper.GetStagingNuGetPackagesDirectory(executionContext.AspireHomeDirectory),
+            expectedCacheKey);
+        Assert.Equal(expectedCachePath, gpfValue);
     }
 
     [Fact]
@@ -560,7 +662,7 @@ public class PrebuiltAppHostServerTests(ITestOutputHelper outputHelper)
             quality: PackageChannelQuality.Both,
             mappings: [new PackageMapping("Aspire*", channelSource), new PackageMapping(PackageMapping.AllPackages, NuGetOrgSource)],
             nuGetPackageCache: new FakeNuGetPackageCache(),
-            features: new TestFeatures());
+            features: new TestFeatures(), NullLogger.Instance);
         var server = CreateServerWithChannel(workspace, stagingChannel, CreateContextWithIdentityChannel("pr-12345"));
 
         using var result = await InvokeTryCreateTemporaryNuGetConfigAsync(
@@ -606,7 +708,7 @@ public class PrebuiltAppHostServerTests(ITestOutputHelper outputHelper)
             quality: PackageChannelQuality.Both,
             mappings: [new PackageMapping(PackageMapping.AllPackages, channelSource)],
             nuGetPackageCache: new FakeNuGetPackageCache(),
-            features: new TestFeatures());
+            features: new TestFeatures(), NullLogger.Instance);
         var server = CreateServerWithChannel(workspace, stagingChannel, CreateContextWithIdentityChannel("pr-12345"));
 
         using var result = await InvokeTryCreateTemporaryNuGetConfigAsync(
@@ -660,7 +762,7 @@ public class PrebuiltAppHostServerTests(ITestOutputHelper outputHelper)
             quality: PackageChannelQuality.Both,
             mappings: [new PackageMapping("Aspire*", channelSource)],
             nuGetPackageCache: new FakeNuGetPackageCache(),
-            features: new TestFeatures());
+            features: new TestFeatures(), NullLogger.Instance);
         var server = CreateServerWithChannel(workspace, stagingChannel, CreateContextWithIdentityChannel("pr-12345"));
 
         var sources = await InvokeGetNuGetSourcesAsync(server, requestedChannel: "staging", packageSourceOverride: packageSourceOverride);
@@ -682,7 +784,7 @@ public class PrebuiltAppHostServerTests(ITestOutputHelper outputHelper)
             quality: PackageChannelQuality.Both,
             mappings: [new PackageMapping("CommunityToolkit*", channelSource)],
             nuGetPackageCache: new FakeNuGetPackageCache(),
-            features: new TestFeatures());
+            features: new TestFeatures(), NullLogger.Instance);
         var server = CreateServerWithChannel(workspace, stagingChannel, CreateContextWithIdentityChannel("pr-12345"));
 
         var sources = await InvokeGetNuGetSourcesAsync(server, requestedChannel: "staging", packageSourceOverride: packageSourceOverride);
@@ -706,7 +808,7 @@ public class PrebuiltAppHostServerTests(ITestOutputHelper outputHelper)
             quality: PackageChannelQuality.Both,
             mappings: [new PackageMapping(PackageMapping.AllPackages, channelSource)],
             nuGetPackageCache: new FakeNuGetPackageCache(),
-            features: new TestFeatures());
+            features: new TestFeatures(), NullLogger.Instance);
         var server = CreateServerWithChannel(workspace, stagingChannel, CreateContextWithIdentityChannel("pr-12345"));
 
         var sources = await InvokeGetNuGetSourcesAsync(server, requestedChannel: "staging", packageSourceOverride: packageSourceOverride);
@@ -800,7 +902,7 @@ public class PrebuiltAppHostServerTests(ITestOutputHelper outputHelper)
             new PackageMapping(PackageMapping.AllPackages, "https://pkgs.dev.azure.com/fake/v3/index.json")
         };
         var dailyChannel = PackageChannel.CreateExplicitChannel(
-            "daily", PackageChannelQuality.Both, mappings, new FakeNuGetPackageCache(), new TestFeatures());
+            "daily", PackageChannelQuality.Both, mappings, new FakeNuGetPackageCache(), new TestFeatures(), NullLogger.Instance);
         var packagingService = new TestPackagingService
         {
             GetChannelsAsyncCallback = _ => Task.FromResult<IEnumerable<PackageChannel>>([dailyChannel]),
@@ -845,7 +947,7 @@ public class PrebuiltAppHostServerTests(ITestOutputHelper outputHelper)
             new PackageMapping(PackageMapping.AllPackages, "https://pkgs.dev.azure.com/fake/v3/index.json")
         };
         var dailyChannel = PackageChannel.CreateExplicitChannel(
-            "daily", PackageChannelQuality.Both, mappings, new FakeNuGetPackageCache(), new TestFeatures());
+            "daily", PackageChannelQuality.Both, mappings, new FakeNuGetPackageCache(), new TestFeatures(), NullLogger.Instance);
 
         var packagingService = new TestPackagingService
         {
@@ -893,7 +995,7 @@ public class PrebuiltAppHostServerTests(ITestOutputHelper outputHelper)
             new PackageMapping(PackageMapping.AllPackages, "https://pkgs.dev.azure.com/fake/v3/index.json")
         };
         var channel = PackageChannel.CreateExplicitChannel(
-            channelName, PackageChannelQuality.Both, mappings, new FakeNuGetPackageCache(), new TestFeatures());
+            channelName, PackageChannelQuality.Both, mappings, new FakeNuGetPackageCache(), new TestFeatures(), NullLogger.Instance);
         return CreateServerWithChannel(workspace, channel, executionContext);
     }
 
@@ -1166,7 +1268,7 @@ public class PrebuiltAppHostServerTests(ITestOutputHelper outputHelper)
             quality: PackageChannelQuality.Both,
             mappings: [new PackageMapping("Aspire*", packageSource.FullName)],
             nuGetPackageCache: new FakeNuGetPackageCache(),
-            features: new TestFeatures());
+            features: new TestFeatures(), NullLogger.Instance);
         var packagingService = new TestPackagingService
         {
             GetChannelsAsyncCallback = _ => Task.FromResult<IEnumerable<PackageChannel>>([channel])
@@ -1230,7 +1332,7 @@ public class PrebuiltAppHostServerTests(ITestOutputHelper outputHelper)
                 new PackageMapping(PackageMapping.AllPackages, channelSource)
             ],
             nuGetPackageCache: new FakeNuGetPackageCache(),
-            features: new TestFeatures());
+            features: new TestFeatures(), NullLogger.Instance);
         var packagingService = new TestPackagingService
         {
             GetChannelsAsyncCallback = _ => Task.FromResult<IEnumerable<PackageChannel>>([channel])
@@ -1285,7 +1387,7 @@ public class PrebuiltAppHostServerTests(ITestOutputHelper outputHelper)
             quality: PackageChannelQuality.Both,
             mappings: [new PackageMapping("Aspire*", channelSource)],
             nuGetPackageCache: new FakeNuGetPackageCache(),
-            features: new TestFeatures());
+            features: new TestFeatures(), NullLogger.Instance);
         var packagingService = new TestPackagingService
         {
             GetChannelsAsyncCallback = _ => Task.FromResult<IEnumerable<PackageChannel>>([channel])
@@ -1400,7 +1502,7 @@ public class PrebuiltAppHostServerTests(ITestOutputHelper outputHelper)
             quality: PackageChannelQuality.Both,
             mappings: [new PackageMapping("Aspire*", missingPackageSource)],
             nuGetPackageCache: new FakeNuGetPackageCache(),
-            features: new TestFeatures());
+            features: new TestFeatures(), NullLogger.Instance);
         var packagingService = new TestPackagingService
         {
             GetChannelsAsyncCallback = _ => Task.FromResult<IEnumerable<PackageChannel>>([channel])
@@ -1469,7 +1571,7 @@ public class PrebuiltAppHostServerTests(ITestOutputHelper outputHelper)
                 new PackageMapping(PackageMapping.AllPackages, NuGetOrgSource)
             ],
             nuGetPackageCache: new FakeNuGetPackageCache(),
-            features: new TestFeatures());
+            features: new TestFeatures(), NullLogger.Instance);
         var packagingService = new TestPackagingService
         {
             GetChannelsAsyncCallback = _ => Task.FromResult<IEnumerable<PackageChannel>>([dailyChannel])
@@ -1651,7 +1753,7 @@ public class PrebuiltAppHostServerTests(ITestOutputHelper outputHelper)
             quality: PackageChannelQuality.Both,
             mappings: [new PackageMapping("Aspire*", channelSource)],
             nuGetPackageCache: new FakeNuGetPackageCache(),
-            features: new TestFeatures());
+            features: new TestFeatures(), NullLogger.Instance);
         var packagingService = new TestPackagingService
         {
             GetChannelsAsyncCallback = _ => Task.FromResult<IEnumerable<PackageChannel>>([dailyChannel])
@@ -1731,7 +1833,7 @@ public class PrebuiltAppHostServerTests(ITestOutputHelper outputHelper)
             quality: PackageChannelQuality.Both,
             mappings: [new PackageMapping("Aspire*", localHive)],
             nuGetPackageCache: new FakeNuGetPackageCache(),
-            features: new TestFeatures());
+            features: new TestFeatures(), NullLogger.Instance);
         var packagingService = new TestPackagingService
         {
             GetChannelsAsyncCallback = _ => Task.FromResult<IEnumerable<PackageChannel>>([prChannel])
@@ -1896,7 +1998,8 @@ public class PrebuiltAppHostServerTests(ITestOutputHelper outputHelper)
                 new PackageMapping(PackageMapping.AllPackages, "https://api.nuget.org/v3/index.json")
             ],
             new FakeNuGetPackageCache(),
-            new TestFeatures());
+            new TestFeatures(),
+            NullLogger.Instance);
         var packagingService = new TestPackagingService
         {
             GetChannelsAsyncCallback = _ => Task.FromResult<IEnumerable<PackageChannel>>([stagingChannel])

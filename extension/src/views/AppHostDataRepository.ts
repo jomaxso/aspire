@@ -4,8 +4,10 @@ import { ChildProcessWithoutNullStreams } from 'child_process';
 import { spawnCliProcess } from '../debugger/languages/cli';
 import { AspireTerminalProvider } from '../utils/AspireTerminalProvider';
 import { extensionLogOutputChannel } from '../utils/logging';
-import { appHostDescribeMayNotBeSupported, aspireCliDescribeNotSupported, aspireDescribeMinimumVersion, errorFetchingAppHosts, workspaceViewSelectedMultipleAppHosts, workspaceViewSelectedSingleAppHost } from '../loc/strings';
-import { AppHostCandidate, findAppHostsWithAspireLs, formatAppHostLanguage, isBuildableAppHostCandidate } from '../utils/workspace';
+import { appHostDescribeMayNotBeSupported, appHostPathMustBeNonEmptyAbsolute, aspireCliCommandFailed, aspireCliCommandTimedOut, aspireCliDescribeNotSupported, aspireCliOutputParseFailed, aspireDescribeMinimumVersion, errorFetchingAppHosts, workspaceViewSelectedMultipleAppHosts, workspaceViewSelectedSingleAppHost } from '../loc/strings';
+import { AppHostCandidate, AppHostDiscoveryService, formatAppHostLanguage, getWorkspaceAppHostProjectSearchResult, isBuildableAppHostCandidate } from '../utils/appHostDiscovery';
+import { ConfigInfoProvider } from '../utils/configInfoProvider';
+import { describeIncludeDisabledCommandsCapability } from '../types/configInfo';
 
 export interface ResourceUrlJson {
     name: string | null;
@@ -18,6 +20,8 @@ export interface ResourceCommandJson {
     displayName?: string | null;
     description: string | null;
     visibility?: string | null;
+    state?: string | null;
+    sortOrder?: number | null;
     argumentInputs?: ResourceCommandArgumentInputJson[] | null;
 }
 
@@ -84,24 +88,87 @@ export interface AppHostDisplayInfo {
     status?: string;
     cliPid: number | null;
     dashboardUrl: string | null;
+    logFilePath?: string | null;
     resources: ResourceJson[] | null | undefined;
+}
+
+interface DescribeSnapshotJson {
+    resources?: ResourceJson[];
+}
+
+export class AspireCliNotInstalledError extends Error {
+    constructor(message: string) {
+        super(message);
+        this.name = 'AspireCliNotInstalledError';
+    }
+}
+
+export class AspireCliFailedError extends Error {
+    constructor(
+        public readonly command: string,
+        public readonly exitCode: number | null,
+        public readonly stdout: string,
+        public readonly stderr: string) {
+        super(aspireCliCommandFailed(command, String(exitCode), getCommandOutputSuffix(stdout, stderr)));
+        this.name = 'AspireCliFailedError';
+    }
+}
+
+export class AspireCliParseError extends Error {
+    constructor(
+        public readonly command: string,
+        public readonly output: string,
+        innerError: unknown) {
+        super(aspireCliOutputParseFailed(command, String(innerError)));
+        this.name = 'AspireCliParseError';
+    }
 }
 
 export type ViewMode = 'workspace' | 'global';
 
+interface GlobalDescribeStream {
+    appHostPath: string;
+    process: ChildProcessWithoutNullStreams | undefined;
+    resources: Map<string, ResourceJson>;
+    nonJsonLines: string[];
+    stderr: string;
+    restartTimer: ReturnType<typeof setTimeout> | undefined;
+    restartDelay: number;
+    version: number;
+}
+
+interface DescribeNoDataError {
+    message: string | undefined;
+    isCompatibilityError: boolean;
+}
+
+interface PostStopRefreshTimer {
+    timer: ReturnType<typeof setTimeout>;
+}
+
 /**
  * Central data repository for app host and resource information.
  *
- * Owns two independent data sources:
+ * Owns three independent data sources:
  *  - `aspire describe --follow` (workspace mode) — streams resource updates
  *    via NDJSON for the selected workspace AppHost.  Only active while the
  *    tree-view panel is visible **and** workspace mode is selected.
+ *  - `aspire describe --follow --apphost <path>` (global mode fan-out) — one
+ *    stream per AppHost discovered by `ps`, merged into `appHost.resources`
+ *    so the global multi-AppHost tree can show nested resources. `ps` itself
+ *    only emits AppHost-level data.
  *  - `aspire ps` polling — periodically fetches running app hosts. In global
  *    mode this backs the full tree; in workspace mode it confirms whether the
  *    selected workspace AppHost is running when the resource stream is empty.
  */
+const oneShotOutputBufferLimit = 4000;
+
 export class AppHostDataRepository {
     private static readonly _processShutdownGracePeriodMs = 5000;
+    private static readonly _appHostStopRefreshDelayMs = 400;
+    private static readonly _appHostStopRefreshMaxAttempts = 75;
+    private static readonly _oneShotCommandTimeoutMs = 30000;
+    private static readonly _oneShotOutputBufferLimit = oneShotOutputBufferLimit;
 
     private readonly _onDidChangeData = new vscode.EventEmitter<void>();
     readonly onDidChangeData = this._onDidChangeData.event;
@@ -110,6 +177,7 @@ export class AppHostDataRepository {
     private _viewMode: ViewMode = 'workspace';
     private _panelVisible = false;
     private _appHostFileOpen = false;
+    private _hasEverBeenDataActive = false;
 
     // ── Workspace mode state (describe --follow) ──
     private _workspaceResources: Map<string, ResourceJson> = new Map();
@@ -119,16 +187,41 @@ export class AppHostDataRepository {
     private _describeReceivedData = false;
     private _describeStartPending = false;
     private _describeStartVersion = 0;
+    // Whether `aspire describe` accepts the hidden `--include-disabled-commands` flag. Resolved
+    // lazily from the CLI's advertised capabilities (`aspire config info --json`) so we don't pass
+    // the flag to an older CLI that would reject it and emit no resource data. Starts optimistic so
+    // that, if capability resolution fails (e.g. a CLI too old to support `config info`), we still
+    // attempt the flag and rely on the locale-independent no-data fallback below.
+    private _includeDisabledCommandsSupported = true;
+    private readonly _configInfoProvider: ConfigInfoProvider;
 
     // ── Running AppHost state (ps polling) ──
     private _appHosts: AppHostDisplayInfo[] = [];
+    // Cached JSON serialization of `_appHosts` after the most recent reconcile so
+    // _handlePsOutput can detect real changes. We can't compare raw `ps` output to
+    // `_appHosts` directly because the in-memory state has merged resources, while
+    // `ps` no longer emits them (#17479) — see _handlePsOutput for the rationale.
+    private _appHostsSnapshot = '[]';
     private _workspaceAppHost: AppHostDisplayInfo | undefined;
     private _pollingInterval: ReturnType<typeof setInterval> | undefined;
     private _psProcesses = new Set<ChildProcessWithoutNullStreams>();
+    private _psPollingGeneration = 0;
+    private _oneShotProcesses = new Set<ChildProcessWithoutNullStreams>();
     private _psFetchVersion = 0;
-    private _supportsResources = true;
     private _supportsPsFollow = true;
     private _fetchInProgress = false;
+    private _postStopRefreshTimers = new Map<string, PostStopRefreshTimer>();
+    private _authoritativeSnapshotInProgress = false;
+    private _authoritativeSnapshotPending = false;
+    private _authoritativeSnapshotRequestId = 0;
+    private _activeAuthoritativeSnapshotRequestId: number | undefined;
+
+    // ── Global mode per-AppHost describe streams ──
+    // In global mode `ps` only returns AppHost-level data, so to populate
+    // `appHost.resources` for the multi-AppHost tree we fan out one
+    // `aspire describe --follow --apphost <path>` per discovered AppHost and
+    // merge the streams. Keyed by appHostPath.
+    private _globalDescribeStreams = new Map<string, GlobalDescribeStream>();
 
     // ── Workspace app host (from aspire ls) ──
     // The singular fields track a selected/default workspace AppHost. The candidate
@@ -140,12 +233,21 @@ export class AppHostDataRepository {
     private _workspaceAppHostDescription: string | undefined;
     private _workspaceAppHostDiscoveryComplete = false;
     private _workspaceAppHostDiscoveryUsesWorkspaceRoot = false;
-    private _getAppHostsProcess: ChildProcessWithoutNullStreams | undefined;
+    private _workspaceAppHostDiscoveryVersion = 0;
+    private _workspaceAppHostDiscoveryInProgress = false;
+    private _workspaceAppHostDiscoveryRefreshQueued = false;
+    private _workspaceAppHostDiscoveryCancellationSource: vscode.CancellationTokenSource | undefined;
+    private readonly _appHostDiscoveryChangeDisposable: vscode.Disposable;
+    private readonly _workspaceFoldersChangeDisposable: vscode.Disposable;
+    private readonly _appHostDiscoveryService: AppHostDiscoveryService;
+    private readonly _ownsAppHostDiscoveryService: boolean;
 
     // ── Error state ──
     private _describeErrorMessage: string | undefined;
+    private _describeErrorIsCompatibility = false;
     private _psErrorMessage: string | undefined;
     private _errorMessage: string | undefined;
+    private _errorIsCompatibility = false;
 
     // ── Loading state ──
     private _loadingWorkspace = true;
@@ -154,13 +256,39 @@ export class AppHostDataRepository {
     private readonly _configChangeDisposable: vscode.Disposable;
     private _disposed = false;
 
-    constructor(private readonly _terminalProvider: AspireTerminalProvider) {
+    constructor(private readonly _terminalProvider: AspireTerminalProvider, appHostDiscoveryService?: AppHostDiscoveryService) {
+        this._appHostDiscoveryService = appHostDiscoveryService ?? new AppHostDiscoveryService(_terminalProvider);
+        this._ownsAppHostDiscoveryService = appHostDiscoveryService === undefined;
+        this._configInfoProvider = new ConfigInfoProvider(_terminalProvider);
+        this._appHostDiscoveryChangeDisposable = this._appHostDiscoveryService.onDidChangeCandidates(workspaceFolder => {
+            const rootFolder = vscode.workspace.workspaceFolders?.[0];
+            if (rootFolder?.uri.toString() === workspaceFolder.uri.toString()) {
+                this._fetchWorkspaceAppHost();
+            }
+        });
+        this._workspaceFoldersChangeDisposable = vscode.workspace.onDidChangeWorkspaceFolders(() => {
+            this._stopDescribeWatch({ clearWorkspaceResources: true });
+            this._stopAllGlobalDescribes();
+            this._stopPolling();
+            this._workspaceAppHostDiscoveryComplete = false;
+            this._clearWorkspaceAppHostDiscovery();
+            this._clearWorkspaceAppHostData();
+            this._clearErrors();
+            this._updateWorkspaceContext();
+            this._fetchWorkspaceAppHost({ forceRefresh: true });
+        });
         this._fetchWorkspaceAppHost();
         this._configChangeDisposable = vscode.workspace.onDidChangeConfiguration(e => {
             if (e.affectsConfiguration('aspire.globalAppHostsPollingInterval') && this._shouldPoll) {
                 this._startPsPolling();
             }
         });
+        // Kick off the CLI capability probe eagerly (fire-and-forget) so the cached describe gate is
+        // ready by the time a describe stream starts. We must NOT await capabilities on the describe
+        // start path: an await there would reorder the describe spawn after other streams (e.g. ps)
+        // and change observable process ordering. Until the probe resolves we use the optimistic
+        // default and the per-stream no-data fallback corrects a stale CLI.
+        void this._resolveDescribeCapability();
     }
 
     // ── Public accessors ──
@@ -189,12 +317,21 @@ export class AppHostDataRepository {
         return this._workspaceAppHostPath;
     }
 
-    get hasMultipleWorkspaceAppHosts(): boolean {
-        return this._workspaceAppHostCandidatePaths.length > 1;
+    get workspaceAppHostCandidatePaths(): readonly string[] {
+        return this._workspaceAppHostCandidatePaths;
     }
 
     get workspaceAppHostDescription(): string | undefined {
         return this._workspaceAppHostDescription;
+    }
+
+    get isLoading(): boolean {
+        const isLoading = this._viewMode === 'workspace' ? this._loadingWorkspace : this._loadingGlobal;
+        return this._dataActive && isLoading;
+    }
+
+    get isWorkspaceAppHostDiscoveryComplete(): boolean {
+        return this._workspaceAppHostDiscoveryComplete;
     }
 
     get errorMessage(): string | undefined {
@@ -223,8 +360,14 @@ export class AppHostDataRepository {
         if (this._panelVisible === visible) {
             return;
         }
+        const wasDataActive = this._dataActive;
         this._panelVisible = visible;
-        this._syncPolling();
+        const becameDataActive = !wasDataActive && this._dataActive;
+        const resumedFromInactive = becameDataActive && this._hasEverBeenDataActive;
+        if (this._dataActive) {
+            this._hasEverBeenDataActive = true;
+        }
+        this._syncPolling(resumedFromInactive);
     }
 
     /**
@@ -238,22 +381,115 @@ export class AppHostDataRepository {
         if (this._appHostFileOpen === open) {
             return;
         }
+        const wasDataActive = this._dataActive;
         this._appHostFileOpen = open;
-        this._syncPolling();
+        const becameDataActive = !wasDataActive && this._dataActive;
+        const resumedFromInactive = becameDataActive && this._hasEverBeenDataActive;
+        if (this._dataActive) {
+            this._hasEverBeenDataActive = true;
+        }
+        this._syncPolling(resumedFromInactive);
     }
 
     refresh(): void {
         this._stopDescribeWatch();
+        this._stopAllGlobalDescribes();
         this._workspaceResources.clear();
         this._clearErrors();
+        // A user-triggered refresh should observe AppHost/config files written by tools
+        // even when the file watcher has not delivered an invalidation event yet.
+        this._workspaceAppHostDiscoveryComplete = false;
+        this._clearWorkspaceAppHostDiscovery();
         this._updateWorkspaceContext();
         this._describeRestartDelay = 5000;
+        this._fetchWorkspaceAppHost({ forceRefresh: true });
         if (this._shouldWatchWorkspace) {
             this._startDescribeWatch();
         }
         if (this._shouldPoll) {
-            this._fetchAppHosts();
+            this._refreshAppHostsFromAuthoritativeSnapshot();
         }
+    }
+
+    requestAppHostStopRefresh(appHostPath: string): void {
+        if (this._disposed || !this._shouldPoll || !appHostPath) {
+            return;
+        }
+
+        const key = this._resolveStopRefreshKey(appHostPath);
+        this._schedulePostStopRefresh(key, AppHostDataRepository._appHostStopRefreshMaxAttempts);
+    }
+
+    private _schedulePostStopRefresh(appHostPath: string, remainingAttempts: number): void {
+        const existing = this._postStopRefreshTimers.get(appHostPath);
+        if (existing) {
+            clearTimeout(existing.timer);
+        }
+
+        const refreshTimer = setTimeout(() => {
+            this._postStopRefreshTimers.delete(appHostPath);
+            if (this._disposed || !this._shouldPoll) {
+                return;
+            }
+
+            if (remainingAttempts < AppHostDataRepository._appHostStopRefreshMaxAttempts && !this._hasAppHost(appHostPath)) {
+                return;
+            }
+
+            this._refreshAppHostsFromAuthoritativeSnapshot();
+            if (remainingAttempts > 1) {
+                this._schedulePostStopRefresh(appHostPath, remainingAttempts - 1);
+            }
+        }, AppHostDataRepository._appHostStopRefreshDelayMs);
+        (refreshTimer as { unref?: () => void }).unref?.();
+        this._postStopRefreshTimers.set(appHostPath, { timer: refreshTimer });
+    }
+
+    private _hasAppHost(appHostPath: string): boolean {
+        return this._findMatchingRunningAppHostPath(appHostPath) !== undefined;
+    }
+
+    private _resolveStopRefreshKey(appHostPath: string): string {
+        const resolvedAppHostPath = this._findMatchingRunningAppHostPath(appHostPath) ?? appHostPath;
+        for (const existingPath of this._postStopRefreshTimers.keys()) {
+            if (isMatchingAppHostPath(existingPath, resolvedAppHostPath)) {
+                return existingPath;
+            }
+        }
+
+        return getComparisonKey(path.normalize(resolvedAppHostPath));
+    }
+
+    private _findMatchingRunningAppHostPath(appHostPath: string): string | undefined {
+        const runningAppHostPaths = this._getRunningAppHostPaths();
+        const exactMatch = runningAppHostPaths.find(runningPath => isMatchingAppHostPath(runningPath, appHostPath));
+        if (exactMatch) {
+            return exactMatch;
+        }
+
+        const folderMatches = runningAppHostPaths.filter(runningPath => isAppHostPathUnderFolder(runningPath, appHostPath));
+        return folderMatches.length === 1 ? folderMatches[0] : undefined;
+    }
+
+    private _getRunningAppHostPaths(): string[] {
+        const paths: string[] = [];
+        for (const appHostPath of [
+            ...this._appHosts.map(appHost => appHost.appHostPath),
+            this._workspaceAppHost?.appHostPath,
+        ]) {
+            if (appHostPath && !paths.some(existingPath => isSameAppHostPath(existingPath, appHostPath))) {
+                paths.push(appHostPath);
+            }
+        }
+
+        return paths;
+    }
+
+    private _clearPostStopRefreshTimers(): void {
+        for (const state of this._postStopRefreshTimers.values()) {
+            clearTimeout(state.timer);
+        }
+        this._postStopRefreshTimers.clear();
     }
 
     activate(): void {
@@ -261,17 +497,52 @@ export class AppHostDataRepository {
         this._syncPolling();
     }
 
+    async fetchAppHostsOnce(): Promise<AppHostDisplayInfo[]> {
+        const appHosts = await this._runCliJson<AppHostDisplayInfo[] | AppHostDisplayInfo>('aspire ps', ['ps', '--format', 'json']);
+        const appHostList = Array.isArray(appHosts) ? appHosts : [appHosts];
+        const appHostsWithResources = await Promise.allSettled(appHostList.map(async appHost => ({
+            ...appHost,
+            resources: await this._fetchAppHostResourcesOnce(appHost.appHostPath),
+        })));
+
+        return appHostsWithResources.map((result, index) => {
+            if (result.status === 'fulfilled') {
+                return result.value;
+            }
+
+            extensionLogOutputChannel.warn(`Failed to describe AppHost ${appHostList[index].appHostPath}: ${result.reason}`);
+            return {
+                ...appHostList[index],
+                resources: [],
+            };
+        });
+    }
+
+    async runResourceCommand(resourceName: string, appHostPath: string, commandName: 'start' | 'stop'): Promise<void> {
+        const trimmedAppHostPath = appHostPath.trim();
+        if (!trimmedAppHostPath || !path.isAbsolute(trimmedAppHostPath)) {
+            throw new Error(appHostPathMustBeNonEmptyAbsolute);
+        }
+
+        await this._runCliCommand(`aspire resource ${commandName}`, ['resource', resourceName, commandName, '--apphost', trimmedAppHostPath]);
+    }
+
     dispose(): void {
         this._disposed = true;
+        this._clearPostStopRefreshTimers();
+        this._authoritativeSnapshotPending = false;
         this._stopPolling();
         this._stopDescribeWatch();
-        if (this._getAppHostsProcess) {
-            const getAppHostsProcess = this._getAppHostsProcess;
-            this._getAppHostsProcess = undefined;
-            this._terminateProcess(getAppHostsProcess, 'aspire ls');
-        }
+        this._stopAllGlobalDescribes();
+        this._stopOneShotProcesses();
+        this._cancelWorkspaceAppHostDiscovery();
         this._configChangeDisposable.dispose();
+        this._appHostDiscoveryChangeDisposable.dispose();
+        this._workspaceFoldersChangeDisposable.dispose();
         this._onDidChangeData.dispose();
+        if (this._ownsAppHostDiscoveryService) {
+            this._appHostDiscoveryService.dispose();
+        }
     }
 
     // ── PS polling lifecycle ──
@@ -282,9 +553,12 @@ export class AppHostDataRepository {
     }
 
     private get _shouldPoll(): boolean {
-        // Workspace mode still polls ps after the selected AppHost path is known so
-        // a running AppHost can be shown even when describe has no resources to emit.
-        return this._dataActive && (this._viewMode === 'global' || this._workspaceAppHostCandidatePaths.length > 0);
+        // Workspace discovery can take longer than `aspire ps`. Poll immediately so
+        // already-running AppHosts appear in the pane while idle candidates stream in.
+        return this._dataActive
+            && (this._viewMode === 'global'
+                || !this._workspaceAppHostDiscoveryComplete
+                || this._workspaceAppHostCandidatePaths.length > 0);
     }
 
     private get _shouldWatchWorkspace(): boolean {
@@ -299,7 +573,7 @@ export class AppHostDataRepository {
         return this._workspaceAppHostDiscoveryComplete && this._workspaceAppHostPath !== undefined;
     }
 
-    private _syncPolling(): void {
+    private _syncPolling(refreshBeforeFollowOnResume = false): void {
         if (this._disposed) {
             return;
         }
@@ -315,55 +589,114 @@ export class AppHostDataRepository {
         }
 
         if (this._shouldPoll) {
-            this._startPsPolling();
+            const pollingActive = this._pollingInterval !== undefined
+                || this._psProcesses.size > 0
+                || this._fetchInProgress;
+            if (refreshBeforeFollowOnResume && !pollingActive && this._supportsPsFollow && this._appHosts.length > 0) {
+                this._startPsPolling();
+                this._refreshAppHostsFromAuthoritativeSnapshot();
+            } else {
+                this._startPsPolling();
+            }
         } else {
             this._stopPolling();
         }
+
+        // Global describe fan-out is only active while in global mode with the
+        // panel/editor showing. _reconcileGlobalDescribes handles both starting
+        // streams (when there are AppHosts to follow) and tearing them down
+        // (when we leave global mode or hide the panel).
+        this._reconcileGlobalDescribes();
     }
 
     // ── Workspace app host (from aspire ls) ──
 
-    private _fetchWorkspaceAppHost(): void {
+    private _fetchWorkspaceAppHost(options?: { forceRefresh?: boolean }): void {
+        if (this._workspaceAppHostDiscoveryInProgress) {
+            this._workspaceAppHostDiscoveryRefreshQueued = true;
+            // Let the current discovery finish so we don't start overlapping CLI work, but
+            // prevent its now-stale result from briefly restoring old AppHost candidates.
+            this._workspaceAppHostDiscoveryVersion++;
+            return;
+        }
+
+        const discoveryVersion = ++this._workspaceAppHostDiscoveryVersion;
         const workspaceFolders = vscode.workspace.workspaceFolders;
         if (!workspaceFolders || workspaceFolders.length === 0) {
             this._workspaceAppHostDiscoveryComplete = true;
+            this._clearWorkspaceAppHostDiscovery();
+            this._clearWorkspaceAppHostData();
+            this._clearErrors();
+            this._syncPolling();
+            this._updateWorkspaceContext({ clearLoading: true });
             return;
         }
         const rootFolder = workspaceFolders[0];
         this._workspaceAppHostDiscoveryUsesWorkspaceRoot = true;
 
-        extensionLogOutputChannel.info('Fetching workspace apphost via: aspire ls');
+        extensionLogOutputChannel.info('Fetching workspace apphost via shared AppHost discovery');
 
-        this._terminalProvider.getAspireCliExecutablePath().then(cliPath => {
-            if (this._disposed) {
+        const cancellationSource = new vscode.CancellationTokenSource();
+        this._workspaceAppHostDiscoveryInProgress = true;
+        this._workspaceAppHostDiscoveryCancellationSource = cancellationSource;
+
+        this._appHostDiscoveryService.discover(rootFolder, options?.forceRefresh, cancellationSource.token).then(appHosts => {
+            if (cancellationSource.token.isCancellationRequested || !this._isCurrentWorkspaceDiscovery(discoveryVersion, rootFolder)) {
                 return;
             }
 
-            const discovery = findAppHostsWithAspireLs(this._terminalProvider, cliPath, rootFolder);
-            this._getAppHostsProcess = discovery.process;
-            discovery.result.then(result => {
-                if (this._disposed) {
-                    return;
-                }
-
-                this._getAppHostsProcess = undefined;
-                this._workspaceAppHostDiscoveryComplete = true;
-                this._handleWorkspaceAppHostCandidates(result.app_host_candidates, result.selected_project_file);
-            }).catch(error => {
-                this._getAppHostsProcess = undefined;
-                this._workspaceAppHostDiscoveryComplete = true;
-                extensionLogOutputChannel.warn(`aspire ls error: ${error}`);
-                this._syncPolling();
-            });
+            const result = getWorkspaceAppHostProjectSearchResult(rootFolder, appHosts);
+            this._workspaceAppHostDiscoveryComplete = true;
+            this._handleWorkspaceAppHostCandidates(result.app_host_candidates, result.selected_project_file);
         }).catch(error => {
+            if (cancellationSource.token.isCancellationRequested || !this._isCurrentWorkspaceDiscovery(discoveryVersion, rootFolder)) {
+                return;
+            }
+
             this._workspaceAppHostDiscoveryComplete = true;
             extensionLogOutputChannel.warn(`Failed to fetch workspace apphost: ${error}`);
+            this._clearWorkspaceAppHostDiscovery();
+            this._clearWorkspaceAppHostData();
+            this._setDescribeError(errorFetchingAppHosts(String(error)));
+            this._updateWorkspaceContext({ clearLoading: true });
             this._syncPolling();
+        }).finally(() => {
+            cancellationSource.dispose();
+            if (this._workspaceAppHostDiscoveryCancellationSource !== cancellationSource) {
+                return;
+            }
+
+            this._workspaceAppHostDiscoveryCancellationSource = undefined;
+            this._workspaceAppHostDiscoveryInProgress = false;
+            if (this._workspaceAppHostDiscoveryRefreshQueued && !this._disposed) {
+                this._workspaceAppHostDiscoveryRefreshQueued = false;
+                this._fetchWorkspaceAppHost({ forceRefresh: true });
+            }
         });
+    }
+
+    private _cancelWorkspaceAppHostDiscovery(): void {
+        this._workspaceAppHostDiscoveryRefreshQueued = false;
+        this._workspaceAppHostDiscoveryCancellationSource?.cancel();
+        this._workspaceAppHostDiscoveryCancellationSource?.dispose();
+        this._workspaceAppHostDiscoveryCancellationSource = undefined;
+        this._workspaceAppHostDiscoveryInProgress = false;
     }
 
     private _handleWorkspaceAppHostCandidates(appHostCandidates: readonly AppHostCandidate[], selectedAppHostPath: string | null): void {
         const buildableAppHostCandidates = appHostCandidates.filter(isBuildableAppHostCandidate);
+
+        if (buildableAppHostCandidates.length === 0) {
+            this._clearWorkspaceAppHostDiscovery();
+            this._clearWorkspaceAppHostData();
+            if (appHostCandidates.length > 0) {
+                extensionLogOutputChannel.info(`aspire ls found ${appHostCandidates.length} AppHost candidates, but none are buildable`);
+            }
+            this._clearErrors();
+            this._syncPolling();
+            this._updateWorkspaceContext({ clearLoading: true });
+            return;
+        }
 
         if (buildableAppHostCandidates.length > 1) {
             this._setWorkspaceAppHostCandidatePaths(buildableAppHostCandidates);
@@ -373,8 +706,10 @@ export class AppHostDataRepository {
                 this._clearWorkspaceAppHostSelection();
             }
             this._workspaceAppHostDescription = workspaceViewSelectedMultipleAppHosts(buildableAppHostCandidates.length);
-            extensionLogOutputChannel.info(`Workspace contains ${buildableAppHostCandidates.length} buildable AppHosts; keeping workspace view`);
-            this.setViewMode('workspace');
+            extensionLogOutputChannel.info(`Workspace contains ${buildableAppHostCandidates.length} buildable AppHosts`);
+            if (this._viewMode === 'workspace') {
+                this.setViewMode('workspace');
+            }
             this._syncPolling();
             this._onDidChangeData.fire();
             return;
@@ -390,9 +725,19 @@ export class AppHostDataRepository {
             extensionLogOutputChannel.info(`Workspace apphost resolved: ${selectedAppHostCandidate.path} (${selectedAppHostCandidate.language}, ${selectedAppHostCandidate.status})`);
             this._syncPolling();
             this._onDidChangeData.fire();
-        } else if (appHostCandidates.length > 0) {
-            extensionLogOutputChannel.info(`aspire ls found ${appHostCandidates.length} AppHost candidates, but none are buildable`);
+            return;
         }
+
+        this._clearWorkspaceAppHostDiscovery();
+        this._syncPolling();
+        this._updateWorkspaceContext({ clearLoading: true });
+    }
+
+    private _isCurrentWorkspaceDiscovery(discoveryVersion: number, workspaceFolder: vscode.WorkspaceFolder): boolean {
+        const rootFolder = vscode.workspace.workspaceFolders?.[0];
+        return !this._disposed
+            && discoveryVersion === this._workspaceAppHostDiscoveryVersion
+            && rootFolder?.uri.toString() === workspaceFolder.uri.toString();
     }
 
     private _setWorkspaceAppHostPath(appHostPath: string, appHostCandidates: readonly AppHostCandidate[]): void {
@@ -400,6 +745,13 @@ export class AppHostDataRepository {
         const appHostCandidatePaths = appHostCandidates.map(candidate => candidate.path);
         const appHostLabels = shortenPaths(appHostCandidatePaths);
         const candidateIndex = appHostCandidatePaths.findIndex(candidatePath => isMatchingAppHostPath(candidatePath, appHostPath));
+        this._workspaceAppHostName = candidateIndex >= 0 ? appHostLabels[candidateIndex] : shortenPath(appHostPath);
+    }
+
+    private _setWorkspaceAppHostPathFromCurrentCandidates(appHostPath: string): void {
+        this._workspaceAppHostPath = appHostPath;
+        const appHostLabels = shortenPaths(this._workspaceAppHostCandidatePaths);
+        const candidateIndex = this._workspaceAppHostCandidatePaths.findIndex(candidatePath => isMatchingAppHostPath(candidatePath, appHostPath));
         this._workspaceAppHostName = candidateIndex >= 0 ? appHostLabels[candidateIndex] : shortenPath(appHostPath);
     }
 
@@ -418,9 +770,33 @@ export class AppHostDataRepository {
         this._workspaceAppHostDescription = undefined;
     }
 
+    private _clearWorkspaceAppHostData(): void {
+        this._workspaceResources.clear();
+        this._workspaceAppHost = undefined;
+        if (this._viewMode === 'workspace') {
+            this._appHosts = [];
+            this._appHostsSnapshot = '[]';
+        }
+    }
+
     // ── Workspace mode: describe --follow ──
 
-    private _startDescribeWatch(): void {
+    /**
+     * Reads the CLI's advertised capabilities and maps the describe `--include-disabled-commands`
+     * capability onto {@link _includeDisabledCommandsSupported}. Best-effort: on a missing/older CLI
+     * the optimistic default and per-stream no-data fallback still cover us.
+     */
+    private async _resolveDescribeCapability(): Promise<void> {
+        const configInfo = await this._configInfoProvider.getConfigInfo({ suppressErrors: true });
+        if (this._disposed || !configInfo) {
+            return;
+        }
+
+        this._includeDisabledCommandsSupported = configInfo.capabilities?.includes(describeIncludeDisabledCommandsCapability) ?? false;
+        extensionLogOutputChannel.info(`CLI capability '${describeIncludeDisabledCommandsCapability}' ${this._includeDisabledCommandsSupported ? 'advertised' : 'not advertised'}; describe --include-disabled-commands ${this._includeDisabledCommandsSupported ? 'enabled' : 'disabled'}.`);
+    }
+
+    private _startDescribeWatch(forceIncludeDisabledCommands?: boolean): void {
         if (this._describeProcess || this._describeStartPending || this._disposed) {
             return;
         }
@@ -435,7 +811,12 @@ export class AppHostDataRepository {
                 return;
             }
 
+            // Read the cached capability synchronously — see constructor for why we don't await here.
+            const includeDisabledCommands = forceIncludeDisabledCommands ?? this._includeDisabledCommandsSupported;
             const args = ['describe', '--follow', '--format', 'json'];
+            if (includeDisabledCommands) {
+                args.push('--include-disabled-commands');
+            }
             if (this._workspaceAppHostPath) {
                 args.push('--apphost', this._workspaceAppHostPath);
             }
@@ -481,9 +862,16 @@ export class AppHostDataRepository {
                     // loop forever. The panel will refresh when the user explicitly
                     // retries or when activity resumes.
                     if (!this._describeReceivedData) {
+                        if (includeDisabledCommands && isIncludeDisabledCommandsUnsupportedOutput(describeNonJsonLines, describeStderr)) {
+                            this._includeDisabledCommandsSupported = false;
+                            this._startDescribeWatch(false);
+                            return;
+                        }
+
                         extensionLogOutputChannel.warn(`aspire describe --follow exited (code ${code}) without producing data; not auto-restarting.`);
                         this._workspaceResources.clear();
-                        this._setDescribeError(this._getDescribeNoDataError(code, describeNonJsonLines, describeStderr));
+                        const noDataError = this._getDescribeNoDataError(code, describeNonJsonLines, describeStderr);
+                        this._setDescribeError(noDataError.message, { compatibility: noDataError.isCompatibilityError });
                         this._updateWorkspaceContext({ clearLoading: true });
                         return;
                     }
@@ -492,6 +880,7 @@ export class AppHostDataRepository {
                     // once more with backoff in case the apphost is restarting; if that
                     // attempt also produces no data we'll fall into the branch above.
                     this._workspaceResources.clear();
+                    this._clearStoppedWorkspaceAppHost();
                     this._setDescribeError(undefined);
                     this._updateWorkspaceContext();
 
@@ -575,6 +964,14 @@ export class AppHostDataRepository {
         }
     }
 
+    private _clearStoppedWorkspaceAppHost(): void {
+        const appHostPath = this._workspaceAppHost?.appHostPath ?? this._workspaceAppHostPath;
+        this._workspaceAppHost = undefined;
+        this._appHosts = appHostPath
+            ? this._appHosts.filter(appHost => !isMatchingAppHostPath(appHost.appHostPath, appHostPath))
+            : [];
+    }
+
     private _handleDescribeLine(line: string): boolean {
         const trimmed = line.trim();
         if (!trimmed) {
@@ -598,24 +995,329 @@ export class AppHostDataRepository {
         return false;
     }
 
-    private _getDescribeNoDataError(exitCode: number | null, nonJsonLines: readonly string[], stderr: string): string | undefined {
+    private _getDescribeNoDataError(exitCode: number | null, nonJsonLines: readonly string[], stderr: string): DescribeNoDataError {
         if (isDescribeUnsupportedOutput(nonJsonLines, stderr)) {
-            return aspireCliDescribeNotSupported(aspireDescribeMinimumVersion);
+            return {
+                message: aspireCliDescribeNotSupported(aspireDescribeMinimumVersion),
+                isCompatibilityError: true,
+            };
         }
 
-        if (exitCode !== 0 && this._workspaceAppHostPath) {
-            return appHostDescribeMayNotBeSupported(aspireDescribeMinimumVersion);
+        if (this._workspaceAppHostPath && exitCode !== 0) {
+            return {
+                message: errorFetchingAppHosts(stderr || `exit code ${exitCode ?? 1}`),
+                isCompatibilityError: false,
+            };
         }
 
-        return undefined;
+        // A clean exit before `ps` observes the AppHost can happen while the app is still starting.
+        // Once `ps` reports the workspace AppHost as running, an empty successful describe stream means
+        // the AppHost cannot serve workspace resources even though the CLI command itself was accepted.
+        if (this._workspaceAppHostPath && this._workspaceAppHost !== undefined) {
+            return {
+                message: appHostDescribeMayNotBeSupported(aspireDescribeMinimumVersion),
+                isCompatibilityError: true,
+            };
+        }
+
+        return {
+            message: undefined,
+            isCompatibilityError: false,
+        };
+    }
+
+    // ── Global mode: per-AppHost describe fan-out ──
+    // `ps` is AppHost-level only, so to keep the global multi-AppHost tree
+    // populated with resources we spin up one `aspire describe --follow --apphost <path>`
+    // per AppHost in `_appHosts` and merge the streams into appHost.resources.
+
+    private _reconcileGlobalDescribes(): void {
+        if (this._disposed || this._viewMode !== 'global' || !this._dataActive) {
+            this._stopAllGlobalDescribes();
+            return;
+        }
+
+        const currentPaths = new Set(this._appHosts.map(a => a.appHostPath));
+        for (const path of Array.from(this._globalDescribeStreams.keys())) {
+            if (!currentPaths.has(path)) {
+                this._stopGlobalDescribe(path);
+            }
+        }
+        for (const appHost of this._appHosts) {
+            if (!this._globalDescribeStreams.has(appHost.appHostPath)) {
+                this._startGlobalDescribe(appHost.appHostPath);
+            }
+        }
+        this._attachGlobalResourcesToAppHosts();
+    }
+
+    private _attachGlobalResourcesToAppHosts(): void {
+        for (const appHost of this._appHosts) {
+            const stream = this._globalDescribeStreams.get(appHost.appHostPath);
+            appHost.resources = stream ? Array.from(stream.resources.values()) : null;
+        }
+    }
+
+    private _startGlobalDescribe(appHostPath: string): void {
+        const stream: GlobalDescribeStream = {
+            appHostPath,
+            process: undefined,
+            resources: new Map(),
+            nonJsonLines: [],
+            stderr: '',
+            restartTimer: undefined,
+            restartDelay: 5000,
+            version: 0,
+        };
+        this._globalDescribeStreams.set(appHostPath, stream);
+        const startVersion = ++stream.version;
+
+        this._terminalProvider.getAspireCliExecutablePath().then(cliPath => {
+            // Bail if we were stopped, replaced, or torn down while resolving the cli path.
+            if (this._disposed || this._globalDescribeStreams.get(appHostPath) !== stream || startVersion !== stream.version) {
+                return;
+            }
+
+            // Read the cached capability synchronously — see constructor for why we don't await here.
+            const includeDisabledCommands = this._includeDisabledCommandsSupported;
+            const args = ['describe', '--follow', '--format', 'json'];
+            if (includeDisabledCommands) {
+                args.push('--include-disabled-commands');
+            }
+            args.push('--apphost', appHostPath);
+            extensionLogOutputChannel.info(`Starting aspire describe --follow for AppHost ${appHostPath}`);
+
+            const childProcess = spawnCliProcess(this._terminalProvider, cliPath, args, {
+                noExtensionVariables: true,
+                lineCallback: (line) => {
+                    if (this._globalDescribeStreams.get(appHostPath) !== stream || stream.process !== childProcess) {
+                        return;
+                    }
+                    if (!this._handleGlobalDescribeLine(stream, line) && stream.nonJsonLines.length < 20) {
+                        stream.nonJsonLines.push(line);
+                    }
+                },
+                stderrCallback: (data) => {
+                    // Per-AppHost describe errors should not pollute the global error banner,
+                    // but they MUST be logged so users can diagnose missing resources for
+                    // non-selected AppHosts (e.g., CLI too old to support `describe --apphost`).
+                    extensionLogOutputChannel.warn(`aspire describe --follow stderr for ${appHostPath}: ${data}`);
+                    if (stream.stderr.length < 4000) {
+                        stream.stderr += data;
+                    }
+                },
+                exitCallback: (code) => {
+                    if (this._globalDescribeStreams.get(appHostPath) !== stream || stream.process !== childProcess) {
+                        return;
+                    }
+                    extensionLogOutputChannel.info(`aspire describe --follow for ${appHostPath} exited with code ${code}`);
+                    stream.process = undefined;
+                    if (this._disposed) {
+                        return;
+                    }
+
+                    if (includeDisabledCommands && stream.resources.size === 0 && isIncludeDisabledCommandsUnsupportedOutput(stream.nonJsonLines, stream.stderr)) {
+                        this._includeDisabledCommandsSupported = false;
+                        this._globalDescribeStreams.delete(appHostPath);
+                        this._startGlobalDescribe(appHostPath);
+                        return;
+                    }
+
+                    // AppHost is no longer running — drop the stream entirely; the
+                    // next ps reconcile will recreate it if the AppHost comes back.
+                    if (!this._appHosts.some(a => a.appHostPath === appHostPath)) {
+                        this._globalDescribeStreams.delete(appHostPath);
+                        return;
+                    }
+
+                    stream.resources.clear();
+                    this._attachGlobalResourcesToAppHosts();
+                    this._onDidChangeData.fire();
+
+                    const delay = stream.restartDelay;
+                    stream.restartDelay = Math.min(stream.restartDelay * 2, this._getPollingIntervalMs());
+                    stream.restartTimer = setTimeout(() => {
+                        stream.restartTimer = undefined;
+                        if (this._disposed) {
+                            return;
+                        }
+                        if (this._globalDescribeStreams.get(appHostPath) !== stream) {
+                            return;
+                        }
+                        if (!this._appHosts.some(a => a.appHostPath === appHostPath)) {
+                            this._globalDescribeStreams.delete(appHostPath);
+                            return;
+                        }
+                        this._globalDescribeStreams.delete(appHostPath);
+                        this._startGlobalDescribe(appHostPath);
+                    }, delay);
+                },
+                errorCallback: (error) => {
+                    if (this._globalDescribeStreams.get(appHostPath) !== stream || stream.process !== childProcess) {
+                        return;
+                    }
+                    extensionLogOutputChannel.warn(`aspire describe --follow for ${appHostPath} error: ${error.message}`);
+                    stream.process = undefined;
+                    // Node's `spawn` can fire `error` (e.g., ENOENT when the CLI binary is missing)
+                    // without a subsequent `exit`, which would normally drive the restart loop.
+                    // Drop the dead entry so the next ps reconcile recreates it instead of leaving
+                    // a zombie that blocks reconcile from re-starting the stream.
+                    this._globalDescribeStreams.delete(appHostPath);
+                    stream.resources.clear();
+                    this._attachGlobalResourcesToAppHosts();
+                    this._onDidChangeData.fire();
+                }
+            });
+            stream.process = childProcess;
+        }).catch(error => {
+            extensionLogOutputChannel.warn(`Failed to start describe for ${appHostPath}: ${error}`);
+            // Same hazard as errorCallback above: getAspireCliExecutablePath() can reject
+            // (CLI missing, permission denied, etc.) without ever firing the spawn error/exit
+            // callbacks that would normally clean up. Drop the dead entry so the next
+            // reconcile recreates it instead of leaving a zombie that blocks reconcile
+            // from re-starting the stream.
+            if (this._globalDescribeStreams.get(appHostPath) === stream) {
+                this._globalDescribeStreams.delete(appHostPath);
+            }
+        });
+    }
+
+    private _handleGlobalDescribeLine(stream: GlobalDescribeStream, line: string): boolean {
+        const trimmed = line.trim();
+        if (!trimmed) {
+            return true;
+        }
+
+        try {
+            const resource: ResourceJson = JSON.parse(trimmed);
+            if (resource.name) {
+                stream.resources.set(resource.name, resource);
+                stream.restartDelay = 5000;
+                this._attachGlobalResourcesToAppHosts();
+                this._onDidChangeData.fire();
+                return true;
+            }
+        } catch (e) {
+            extensionLogOutputChannel.warn(`Failed to parse describe NDJSON line for ${stream.appHostPath}: ${e}`);
+        }
+
+        return false;
+    }
+
+    private async _runCliJson<T>(command: string, args: string[]): Promise<T> {
+        const { stdout } = await this._runCliCommand(command, args);
+
+        try {
+            return parseCliJsonOutput<T>(stdout);
+        } catch (error) {
+            throw new AspireCliParseError(command, stdout, error);
+        }
+    }
+
+    private async _runCliCommand(command: string, args: string[]): Promise<{ stdout: string; stderr: string }> {
+        const cliPath = await this._terminalProvider.getAspireCliExecutablePath().catch(error => {
+            throw new AspireCliNotInstalledError(String(error));
+        });
+
+        return new Promise<{ stdout: string; stderr: string }>((resolve, reject) => {
+            let stdout = '';
+            let stderr = '';
+            let settled = false;
+            let timeoutTimer: ReturnType<typeof setTimeout> | undefined;
+            let cliProcess: ChildProcessWithoutNullStreams | undefined;
+
+            const settle = (callback: () => void) => {
+                if (settled) {
+                    return;
+                }
+
+                settled = true;
+                if (timeoutTimer) {
+                    clearTimeout(timeoutTimer);
+                    timeoutTimer = undefined;
+                }
+                if (cliProcess) {
+                    this._oneShotProcesses.delete(cliProcess);
+                    if (cliProcess.exitCode === null && !cliProcess.killed) {
+                        this._terminateProcess(cliProcess, command);
+                    }
+                }
+                callback();
+            };
+
+            timeoutTimer = setTimeout(() => {
+                settle(() => reject(new AspireCliFailedError(command, null, stdout, stderr || aspireCliCommandTimedOut(AppHostDataRepository._oneShotCommandTimeoutMs))));
+            }, AppHostDataRepository._oneShotCommandTimeoutMs);
+
+            cliProcess = spawnCliProcess(this._terminalProvider, cliPath, args, {
+                noExtensionVariables: true,
+                stdoutCallback: (data) => { stdout += data; },
+                stderrCallback: (data) => { stderr = appendLimitedOutput(stderr, data, AppHostDataRepository._oneShotOutputBufferLimit); },
+                exitCallback: (code) => {
+                    if (code !== 0) {
+                        settle(() => reject(new AspireCliFailedError(command, code, stdout, stderr)));
+                        return;
+                    }
+
+                    settle(() => resolve({ stdout, stderr }));
+                },
+                errorCallback: (error) => {
+                    settle(() => reject(new AspireCliNotInstalledError(error.message)));
+                },
+            });
+            this._oneShotProcesses.add(cliProcess);
+        });
+    }
+
+    private async _fetchAppHostResourcesOnce(appHostPath: string): Promise<ResourceJson[]> {
+        const snapshot = await this._runCliJson<DescribeSnapshotJson>('aspire describe', ['describe', '--format', 'json', '--apphost', appHostPath]);
+        return snapshot.resources ?? [];
+    }
+
+    private _stopOneShotProcesses(): void {
+        for (const process of this._oneShotProcesses) {
+            this._terminateProcess(process, 'one-shot aspire command');
+        }
+        this._oneShotProcesses.clear();
+    }
+
+    private _stopGlobalDescribe(appHostPath: string): void {
+        const stream = this._globalDescribeStreams.get(appHostPath);
+        if (!stream) {
+            return;
+        }
+        this._globalDescribeStreams.delete(appHostPath);
+        stream.version++;
+        if (stream.restartTimer) {
+            clearTimeout(stream.restartTimer);
+            stream.restartTimer = undefined;
+        }
+        if (stream.process) {
+            const childProcess = stream.process;
+            stream.process = undefined;
+            this._terminateProcess(childProcess, `aspire describe --follow (${appHostPath})`);
+        }
+    }
+
+    private _stopAllGlobalDescribes(): void {
+        for (const path of Array.from(this._globalDescribeStreams.keys())) {
+            this._stopGlobalDescribe(path);
+        }
     }
 
     private _updateWorkspaceContext(options?: { clearLoading?: boolean }): void {
         const hasWorkspaceAppHost = this._workspaceAppHost !== undefined;
         const hasResources = this._workspaceResources.size > 0;
         const hasRunningAppHosts = this._appHosts.length > 0;
-        vscode.commands.executeCommand('setContext', 'aspire.noRunningAppHosts', !hasWorkspaceAppHost && !hasResources && !hasRunningAppHosts);
-        const clearLoading = options?.clearLoading ?? (hasResources || hasWorkspaceAppHost || hasRunningAppHosts);
+        const hasDashboardUrl = Boolean(this._workspaceAppHost?.dashboardUrl)
+            || Array.from(this._workspaceResources.values()).some(resource => Boolean(resource.dashboardUrl))
+            || this._appHosts.some(appHost => Boolean(appHost.dashboardUrl));
+        const hasWorkspaceCandidates = this._workspaceAppHostCandidatePaths.length > 0;
+        vscode.commands.executeCommand('setContext', 'aspire.noAppHosts', !hasWorkspaceAppHost && !hasResources && !hasRunningAppHosts && !hasWorkspaceCandidates);
+        // Keep this distinct from `noAppHosts`, which also considers discovered idle
+        // candidates that have no live dashboard URL.
+        vscode.commands.executeCommand('setContext', 'aspire.noRunningAppHosts', !hasDashboardUrl);
+        const clearLoading = options?.clearLoading ?? (hasResources || hasWorkspaceAppHost || hasRunningAppHosts || hasWorkspaceCandidates);
         if (this._loadingWorkspace && clearLoading) {
             this._loadingWorkspace = false;
             this._updateLoadingContext();
@@ -653,8 +1355,13 @@ export class AppHostDataRepository {
     }
 
     private _stopPolling(): void {
+        this._psPollingGeneration++;
         this._psFetchVersion++;
         this._fetchInProgress = false;
+        this._authoritativeSnapshotInProgress = false;
+        this._authoritativeSnapshotPending = false;
+        this._activeAuthoritativeSnapshotRequestId = undefined;
+        this._clearPostStopRefreshTimers();
         if (this._pollingInterval) {
             clearInterval(this._pollingInterval);
             this._pollingInterval = undefined;
@@ -682,16 +1389,12 @@ export class AppHostDataRepository {
                 const errorMessage = errorFetchingAppHosts(String(error));
                 extensionLogOutputChannel.warn(errorMessage);
                 this._setPsError(errorMessage);
-                if (this._loadingGlobal) {
-                    this._loadingGlobal = false;
-                    this._updateLoadingContext();
-                }
+                this._clearLoadingForCurrentView();
                 this._supportsPsFollow = false;
                 this._startPsIntervalPolling(false);
             }
             return;
         }
-
         if (!this._isCurrentPsFetch(fetchVersion)) {
             return;
         }
@@ -708,9 +1411,6 @@ export class AppHostDataRepository {
         };
 
         const args = ['ps', '--follow', '--format', 'json'];
-        if (this._supportsResources) {
-            args.push('--resources');
-        }
 
         psProcess = spawnCliProcess(this._terminalProvider, cliPath, args, {
             noExtensionVariables: true,
@@ -761,9 +1461,11 @@ export class AppHostDataRepository {
         }
 
         if (this._viewMode === 'global' && this._loadingGlobal) {
+            const hasDashboardUrl = this._appHosts.some(appHost => Boolean(appHost.dashboardUrl));
             this._loadingGlobal = false;
             this._updateLoadingContext();
-            vscode.commands.executeCommand('setContext', 'aspire.noRunningAppHosts', this._appHosts.length === 0);
+            vscode.commands.executeCommand('setContext', 'aspire.noAppHosts', this._appHosts.length === 0);
+            vscode.commands.executeCommand('setContext', 'aspire.noRunningAppHosts', !hasDashboardUrl);
         }
     }
 
@@ -775,33 +1477,59 @@ export class AppHostDataRepository {
         const fetchVersion = ++this._psFetchVersion;
 
         const args = ['ps', '--format', 'json'];
-        if (this._supportsResources) {
-            args.push('--resources');
-        }
-        this._runPsCommand(args, fetchVersion, (code, stdout, stderr) => {
+        this._runPsCommand(args, (code, stdout, stderr) => {
             if (code === 0) {
                 this._setPsError(undefined);
                 this._handlePsOutput(stdout);
-                this._fetchInProgress = false;
-            } else if (this._supportsResources) {
-                this._supportsResources = false;
-                extensionLogOutputChannel.info('aspire ps --resources failed, falling back to aspire ps without --resources');
-                this._runPsCommand(['ps', '--format', 'json'], fetchVersion, (retryCode, retryStdout, retryStderr) => {
-                    if (retryCode === 0) {
-                        this._setPsError(undefined);
-                        this._handlePsOutput(retryStdout);
-                    } else {
-                        this._loadingGlobal = false;
-                        this._updateLoadingContext();
-                        this._setPsError(errorFetchingAppHosts(retryStderr || `exit code ${retryCode}`));
-                    }
-                    this._fetchInProgress = false;
-                });
             } else {
-                this._loadingGlobal = false;
-                this._updateLoadingContext();
+                this._clearLoadingForCurrentView();
                 this._setPsError(errorFetchingAppHosts(stderr || `exit code ${code}`));
-                this._fetchInProgress = false;
+            }
+            this._fetchInProgress = false;
+        }, { fetchVersion });
+    }
+
+    private _refreshAppHostsFromAuthoritativeSnapshot(): void {
+        if (this._disposed || !this._shouldPoll) {
+            return;
+        }
+
+        if (this._authoritativeSnapshotInProgress) {
+            this._authoritativeSnapshotPending = true;
+            return;
+        }
+
+        this._authoritativeSnapshotInProgress = true;
+        const snapshotRequestId = ++this._authoritativeSnapshotRequestId;
+        this._activeAuthoritativeSnapshotRequestId = snapshotRequestId;
+        const pollingGeneration = this._psPollingGeneration;
+        const args = ['ps', '--format', 'json'];
+        this._runPsCommand(args, (code, stdout, stderr) => {
+            if (this._activeAuthoritativeSnapshotRequestId !== snapshotRequestId) {
+                return;
+            }
+
+            if (pollingGeneration !== this._psPollingGeneration) {
+                this._activeAuthoritativeSnapshotRequestId = undefined;
+                this._authoritativeSnapshotInProgress = false;
+                return;
+            }
+
+            if (!this._disposed && this._shouldPoll) {
+                if (code === 0) {
+                    this._setPsError(undefined);
+                    this._handlePsOutput(stdout);
+                } else {
+                    this._clearLoadingForCurrentView();
+                    this._setPsError(errorFetchingAppHosts(stderr || `exit code ${code}`));
+                }
+            }
+
+            this._activeAuthoritativeSnapshotRequestId = undefined;
+            this._authoritativeSnapshotInProgress = false;
+            if (this._authoritativeSnapshotPending) {
+                this._authoritativeSnapshotPending = false;
+                this._refreshAppHostsFromAuthoritativeSnapshot();
             }
         });
     }
@@ -815,15 +1543,27 @@ export class AppHostDataRepository {
         vscode.commands.executeCommand('setContext', 'aspire.loading', isLoading);
     }
 
+    private _clearLoadingForCurrentView(): void {
+        if (this._viewMode === 'workspace') {
+            this._loadingWorkspace = false;
+        } else {
+            this._loadingGlobal = false;
+        }
+        this._updateLoadingContext();
+    }
+
     private _clearErrors(): void {
         this._describeErrorMessage = undefined;
+        this._describeErrorIsCompatibility = false;
         this._psErrorMessage = undefined;
         this._updateErrorMessage();
     }
 
-    private _setDescribeError(message: string | undefined): void {
-        if (this._describeErrorMessage !== message) {
+    private _setDescribeError(message: string | undefined, options?: { compatibility?: boolean }): void {
+        const compatibility = message !== undefined && (options?.compatibility ?? false);
+        if (this._describeErrorMessage !== message || this._describeErrorIsCompatibility !== compatibility) {
             this._describeErrorMessage = message;
+            this._describeErrorIsCompatibility = compatibility;
             this._updateErrorMessage();
         }
     }
@@ -836,16 +1576,24 @@ export class AppHostDataRepository {
     }
 
     private _updateErrorMessage(): void {
-        const message = this._viewMode === 'workspace'
+        const workspaceMode = this._viewMode === 'workspace';
+        const message = workspaceMode
             ? this._describeErrorMessage ?? this._psErrorMessage
-            : this._psErrorMessage ?? this._describeErrorMessage;
+            : this._psErrorMessage;
+        const isCompatibilityError = workspaceMode
+            ? (this._describeErrorMessage !== undefined
+                ? this._describeErrorIsCompatibility
+                : false)
+            : false;
         const hasError = message !== undefined;
-        if (this._errorMessage !== message) {
+        if (this._errorMessage !== message || this._errorIsCompatibility !== isCompatibilityError) {
             this._errorMessage = message;
+            this._errorIsCompatibility = isCompatibilityError;
             if (message) {
                 extensionLogOutputChannel.warn(message);
             }
             vscode.commands.executeCommand('setContext', 'aspire.fetchAppHostsError', hasError);
+            vscode.commands.executeCommand('setContext', 'aspire.fetchAppHostsCompatibilityError', hasError && isCompatibilityError);
             this._onDidChangeData.fire();
         }
     }
@@ -862,8 +1610,18 @@ export class AppHostDataRepository {
                 return;
             }
 
-            const changed = JSON.stringify(appHosts) !== JSON.stringify(this._appHosts);
+            // Compare against the previous post-reconcile snapshot rather than the
+            // raw ps payload. `appHosts` here lacks the `resources` field (ps no longer
+            // emits it after #17479), while `this._appHosts` was mutated by the prior
+            // _attachGlobalResourcesToAppHosts call to include resources — a direct
+            // JSON.stringify compare would always report `changed` once any stream
+            // produced resources, triggering spurious _onDidChangeData.fire() calls.
+            const previousSnapshot = this._appHostsSnapshot;
             this._appHosts = appHosts;
+            this._reconcileGlobalDescribes();
+            const nextSnapshot = JSON.stringify(this._appHosts);
+            const changed = nextSnapshot !== previousSnapshot;
+            this._appHostsSnapshot = nextSnapshot;
 
             if (this._loadingGlobal) {
                 this._loadingGlobal = false;
@@ -871,7 +1629,9 @@ export class AppHostDataRepository {
             }
 
             if (changed) {
-                vscode.commands.executeCommand('setContext', 'aspire.noRunningAppHosts', appHosts.length === 0);
+                const hasDashboardUrl = this._appHosts.some(appHost => Boolean(appHost.dashboardUrl));
+                vscode.commands.executeCommand('setContext', 'aspire.noAppHosts', appHosts.length === 0);
+                vscode.commands.executeCommand('setContext', 'aspire.noRunningAppHosts', !hasDashboardUrl);
                 this._onDidChangeData.fire();
             }
         } catch (e) {
@@ -891,13 +1651,35 @@ export class AppHostDataRepository {
     }
 
     private _handleWorkspacePsOutput(appHosts: readonly AppHostDisplayInfo[]): void {
-        const workspaceAppHostPath = this._workspaceAppHostPath;
-        const workspaceAppHosts = this._workspaceAppHostCandidatePaths.length > 0
-            ? appHosts.filter(appHost => this._workspaceAppHostCandidatePaths.some(candidatePath => isMatchingAppHostPath(appHost.appHostPath, candidatePath)))
-            : [];
-        const workspaceAppHost = workspaceAppHostPath
+        let workspaceAppHostPath = this._workspaceAppHostPath;
+        const discoveryPending = !this._workspaceAppHostDiscoveryComplete;
+        let workspaceAppHosts: AppHostDisplayInfo[];
+        if (this._workspaceAppHostCandidatePaths.length === 0 && discoveryPending) {
+            workspaceAppHosts = appHosts.filter(appHost => isPathInWorkspace(appHost.appHostPath));
+        } else if (this._workspaceAppHostCandidatePaths.length > 0) {
+            workspaceAppHosts = appHosts.filter(appHost => this._workspaceAppHostCandidatePaths.some(candidatePath => isMatchingAppHostPath(appHost.appHostPath, candidatePath)));
+        } else {
+            workspaceAppHosts = [];
+        }
+        let workspaceAppHost = workspaceAppHostPath
             ? workspaceAppHosts.find(appHost => isMatchingAppHostPath(appHost.appHostPath, workspaceAppHostPath))
             : undefined;
+        let workspaceAppHostPathChanged = false;
+
+        if (!workspaceAppHost && workspaceAppHosts.length === 1) {
+            workspaceAppHost = workspaceAppHosts[0];
+            workspaceAppHostPathChanged = !isMatchingAppHostPath(workspaceAppHostPath, workspaceAppHost.appHostPath);
+            if (workspaceAppHostPathChanged) {
+                extensionLogOutputChannel.info(`Retargeting workspace AppHost describe to running AppHost ${workspaceAppHost.appHostPath}`);
+                this._stopDescribeWatch({ clearWorkspaceResources: true });
+                this._setWorkspaceAppHostPathFromCurrentCandidates(workspaceAppHost.appHostPath);
+                workspaceAppHostPath = this._workspaceAppHostPath;
+                this._setDescribeError(undefined);
+                this._describeRestartDelay = 5000;
+            }
+        }
+
+        const workspaceAppHostStarted = workspaceAppHost !== undefined && (this._workspaceAppHost === undefined || workspaceAppHostPathChanged);
         const changed = JSON.stringify(workspaceAppHosts) !== JSON.stringify(this._appHosts)
             || JSON.stringify(workspaceAppHost) !== JSON.stringify(this._workspaceAppHost);
 
@@ -908,30 +1690,87 @@ export class AppHostDataRepository {
         this._appHosts = workspaceAppHosts;
         this._workspaceAppHost = workspaceAppHost;
 
+        // When multiple workspace AppHost candidates exist, start per-AppHost describe
+        // streams for running AppHosts that are NOT the selected one (the workspace
+        // describe stream already handles the selected AppHost). This ensures every
+        // running AppHost displayed in the multi-AppHost workspace tree has resources.
+        if (this._workspaceAppHostCandidatePaths.length > 1) {
+            this._reconcileWorkspaceDescribes(workspaceAppHosts);
+        }
+
+        if (workspaceAppHostStarted
+            && this._shouldWatchWorkspace
+            && !this._describeProcess
+            && !this._describeStartPending
+            && !this._describeRestartTimer) {
+            this._startDescribeWatch();
+        }
+
         if (changed || this._loadingWorkspace) {
-            this._updateWorkspaceContext({ clearLoading: true });
+            this._updateWorkspaceContext({ clearLoading: !discoveryPending || workspaceAppHosts.length > 0 });
         }
     }
 
-    private async _runPsCommand(args: string[], fetchVersion: number, callback: (code: number, stdout: string, stderr: string) => void): Promise<void> {
+    /**
+     * In multi-candidate workspace mode, start/stop per-AppHost describe streams for
+     * running workspace AppHosts that are NOT the currently selected one. The workspace
+     * describe stream (via `_startDescribeWatch`) handles the selected AppHost; this
+     * method fans out global describe streams for the remaining running AppHosts so that
+     * each one displayed in the workspace tree has its resources populated.
+     */
+    private _reconcileWorkspaceDescribes(workspaceAppHosts: readonly AppHostDisplayInfo[]): void {
+        const selectedPath = this._workspaceAppHostPath;
+
+        // Determine which non-selected workspace AppHosts need a describe stream.
+        const desiredPaths = new Set(
+            workspaceAppHosts
+                .filter(a => !selectedPath || !isMatchingAppHostPath(a.appHostPath, selectedPath))
+                .map(a => a.appHostPath)
+        );
+
+        // Stop streams for AppHosts that are no longer running (or became selected).
+        for (const path of Array.from(this._globalDescribeStreams.keys())) {
+            if (!desiredPaths.has(path)) {
+                this._stopGlobalDescribe(path);
+            }
+        }
+
+        // Start streams for newly running non-selected AppHosts.
+        for (const appHost of workspaceAppHosts) {
+            if (selectedPath && isMatchingAppHostPath(appHost.appHostPath, selectedPath)) {
+                continue;
+            }
+            if (!this._globalDescribeStreams.has(appHost.appHostPath)) {
+                this._startGlobalDescribe(appHost.appHostPath);
+            }
+        }
+
+        this._attachGlobalResourcesToAppHosts();
+    }
+
+    private async _runPsCommand(args: string[], callback: (code: number, stdout: string, stderr: string) => void, options?: { fetchVersion?: number }): Promise<void> {
+        const fetchVersion = options?.fetchVersion;
+        const isCurrentPsCommand = () => {
+            if (fetchVersion !== undefined) {
+                return this._isCurrentPsFetch(fetchVersion);
+            }
+
+            return !this._disposed && this._shouldPoll;
+        };
+
         let cliPath: string;
         try {
             cliPath = await this._terminalProvider.getAspireCliExecutablePath();
         } catch (error) {
-            if (this._isCurrentPsFetch(fetchVersion)) {
-                const errorMessage = errorFetchingAppHosts(String(error));
-                extensionLogOutputChannel.warn(errorMessage);
-                this._setPsError(errorMessage);
-                this._fetchInProgress = false;
-                if (this._loadingGlobal) {
-                    this._loadingGlobal = false;
-                    this._updateLoadingContext();
-                }
+            if (isCurrentPsCommand()) {
+                const rawErrorMessage = String(error);
+                extensionLogOutputChannel.warn(errorFetchingAppHosts(rawErrorMessage));
+                callback(1, '', rawErrorMessage);
             }
             return;
         }
 
-        if (!this._isCurrentPsFetch(fetchVersion)) {
+        if (!isCurrentPsCommand()) {
             return;
         }
 
@@ -957,7 +1796,7 @@ export class AppHostDataRepository {
                 removePsProcess();
                 if (!callbackInvoked) {
                     callbackInvoked = true;
-                    if (this._isCurrentPsFetch(fetchVersion)) {
+                    if (isCurrentPsCommand()) {
                         callback(code ?? 1, stdout, stderr);
                     }
                 }
@@ -967,7 +1806,7 @@ export class AppHostDataRepository {
                 extensionLogOutputChannel.warn(errorFetchingAppHosts(error.message));
                 if (!callbackInvoked) {
                     callbackInvoked = true;
-                    if (this._isCurrentPsFetch(fetchVersion)) {
+                    if (isCurrentPsCommand()) {
                         callback(1, stdout, stderr || error.message);
                     }
                 }
@@ -1134,6 +1973,57 @@ function getComparisonKey(value: string): string {
     return process.platform === 'win32' ? value.toLowerCase() : value;
 }
 
+function getCommandOutputSuffix(stdout: string, stderr: string): string {
+    const output = (stderr || stdout).trim();
+    const limitedOutput = output.length <= oneShotOutputBufferLimit
+        ? output
+        : output.slice(output.length - oneShotOutputBufferLimit);
+
+    return limitedOutput ? `: ${limitedOutput}` : '';
+}
+
+function appendLimitedOutput(existing: string, data: string, limit: number): string {
+    const combined = existing + data;
+
+    return combined.length <= limit ? combined : combined.slice(combined.length - limit);
+}
+
+function parseCliJsonOutput<T>(stdout: string): T {
+    try {
+        return JSON.parse(stdout);
+    } catch (error) {
+        // Some CLI invocations can emit startup diagnostics before the final JSON payload:
+        //   Starting AppHost...
+        //   {"resources":[{"name":"api", ...}]}
+        // Parse the whole output first for the normal deterministic path, then fall back to
+        // the last JSON-looking line so older or chatty CLIs do not poison the snapshot.
+        for (const line of stdout.split(/\r?\n/).reverse()) {
+            const trimmed = line.trim();
+            if (trimmed.startsWith('{') || trimmed.startsWith('[')) {
+                try {
+                    return JSON.parse(trimmed);
+                } catch {
+                    // Keep scanning in case the CLI wrote a JSON-looking diagnostic after the payload.
+                }
+            }
+        }
+
+        throw error;
+    }
+}
+
+function isPathInWorkspace(filePath: string): boolean {
+    const workspaceFolder = vscode.workspace.workspaceFolders?.[0];
+    if (!workspaceFolder) {
+        return false;
+    }
+
+    const relativePath = path.relative(workspaceFolder.uri.fsPath, filePath);
+    return relativePath !== ''
+        && !relativePath.startsWith('..')
+        && !path.isAbsolute(relativePath);
+}
+
 function isDescribeUnsupportedOutput(nonJsonLines: readonly string[], stderr: string): boolean {
     const output = [...nonJsonLines, stderr].join('\n').toLowerCase();
     if (!output) {
@@ -1147,7 +2037,22 @@ function isDescribeUnsupportedOutput(nonJsonLines: readonly string[], stderr: st
         || output.includes('is not a recognized command');
 }
 
-function isMatchingAppHostPath(left: string | undefined, right: string | undefined): boolean {
+function isIncludeDisabledCommandsUnsupportedOutput(nonJsonLines: readonly string[], stderr: string): boolean {
+    // This is only consulted after a describe attempt produced no resource data, so any
+    // non-JSON/stderr output here is diagnostic text rather than successful output. When the
+    // CLI accepts `--include-disabled-commands` it streams JSON resources and never echoes the
+    // flag name back, so the literal flag token only appears when the CLI is reporting that it
+    // does not recognize the option, e.g.:
+    //   English:  Unrecognized command or argument '--include-disabled-commands'.
+    //   Spanish:  No se encuentra el recurso '--include-disabled-commands'.
+    // The flag token itself is never localized, so detecting on its presence keeps this fallback
+    // locale-independent — matching on translated phrases like "unrecognized option" would miss
+    // non-English CLI output (e.g. via ASPIRE_LOCALE_OVERRIDE or the system locale).
+    const output = [...nonJsonLines, stderr].join('\n');
+    return output.includes('--include-disabled-commands');
+}
+
+export function isMatchingAppHostPath(left: string | undefined, right: string | undefined): boolean {
     if (!left || !right) {
         return false;
     }
@@ -1159,9 +2064,39 @@ function isMatchingAppHostPath(left: string | undefined, right: string | undefin
     }
 
     // `aspire extension get-apphosts` resolves a project file while `aspire ps`
-    // can report the AppHost source file. Match by directory as a fallback to
-    // mirror the CodeLens AppHost resolution strategy.
-    return getComparisonKey(path.dirname(normalizedLeft)) === getComparisonKey(path.dirname(normalizedRight));
+    // can report the AppHost source file. Match by directory only for that
+    // project/source-file shape so sibling AppHost projects don't collapse into
+    // the same workspace AppHost.
+    return getComparisonKey(path.dirname(normalizedLeft)) === getComparisonKey(path.dirname(normalizedRight))
+        && isProjectFileToSourceFileMatch(normalizedLeft, normalizedRight);
+}
+
+export function isAppHostPathUnderFolder(appHostPath: string | undefined, folderPath: string | undefined): boolean {
+    if (!appHostPath || !folderPath) {
+        return false;
+    }
+
+    const normalizedAppHostPath = getComparisonKey(path.normalize(appHostPath));
+    const normalizedFolderPath = getComparisonKey(path.normalize(folderPath));
+    if (normalizedAppHostPath === normalizedFolderPath) {
+        return false;
+    }
+
+    const folderPrefix = normalizedFolderPath.endsWith(path.sep) ? normalizedFolderPath : `${normalizedFolderPath}${path.sep}`;
+    return normalizedAppHostPath.startsWith(folderPrefix);
+}
+
+function isProjectFileToSourceFileMatch(left: string, right: string): boolean {
+    return (isProjectFile(left) && isAppHostSourceFile(right)) || (isAppHostSourceFile(left) && isProjectFile(right));
+}
+
+function isProjectFile(value: string): boolean {
+    return path.extname(value).toLowerCase() === '.csproj';
+}
+
+function isAppHostSourceFile(value: string): boolean {
+    const fileName = path.basename(value).toLowerCase();
+    return fileName === 'apphost.cs' || fileName === 'program.cs';
 }
 
 function isSameAppHostPath(left: string | undefined, right: string | undefined): boolean {

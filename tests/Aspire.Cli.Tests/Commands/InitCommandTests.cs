@@ -14,6 +14,7 @@ using Aspire.Cli.Tests.TestServices;
 using Aspire.Cli.Tests.Utils;
 using Aspire.Shared;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.AspNetCore.InternalTesting;
 
 namespace Aspire.Cli.Tests.Commands;
@@ -42,7 +43,7 @@ public class InitCommandTests(ITestOutputHelper outputHelper)
                         [new NuGetPackageCli { Id = "Aspire.ProjectTemplates", Source = "nuget.org", Version = version }])
             };
 
-            var implicitChannel = PackageChannel.CreateImplicitChannel(fakeCache, new TestFeatures());
+            var implicitChannel = PackageChannel.CreateImplicitChannel(fakeCache, new TestFeatures(), NullLogger.Instance);
 
             var packagingService = new TestPackagingService
             {
@@ -94,7 +95,7 @@ public class InitCommandTests(ITestOutputHelper outputHelper)
             };
         });
 
-        var serviceProvider = services.BuildServiceProvider();
+        using var serviceProvider = services.BuildServiceProvider();
         var initCommand = serviceProvider.GetRequiredService<InitCommand>();
 
         var parseResult = initCommand.Parse("init");
@@ -137,7 +138,7 @@ public class InitCommandTests(ITestOutputHelper outputHelper)
             };
         });
 
-        var serviceProvider = services.BuildServiceProvider();
+        using var serviceProvider = services.BuildServiceProvider();
         var initCommand = serviceProvider.GetRequiredService<InitCommand>();
 
         var parseResult = initCommand.Parse("init");
@@ -154,7 +155,7 @@ public class InitCommandTests(ITestOutputHelper outputHelper)
         using var workspace = TemporaryWorkspace.Create(outputHelper);
 
         var services = CliTestHelper.CreateServiceCollection(workspace, outputHelper);
-        var serviceProvider = services.BuildServiceProvider();
+        using var serviceProvider = services.BuildServiceProvider();
         var initCommand = serviceProvider.GetRequiredService<InitCommand>();
 
         var parseResult = initCommand.Parse("init");
@@ -180,7 +181,7 @@ public class InitCommandTests(ITestOutputHelper outputHelper)
         using var workspace = TemporaryWorkspace.Create(outputHelper);
 
         var services = CliTestHelper.CreateServiceCollection(workspace, outputHelper);
-        var serviceProvider = services.BuildServiceProvider();
+        using var serviceProvider = services.BuildServiceProvider();
         var initCommand = serviceProvider.GetRequiredService<InitCommand>();
 
         var parseResult = initCommand.Parse("init");
@@ -261,7 +262,7 @@ public class InitCommandTests(ITestOutputHelper outputHelper)
         File.WriteAllText(Path.Combine(workspace.WorkspaceRoot.FullName, "aspire.config.json"), existingAspireConfig);
 
         var services = CliTestHelper.CreateServiceCollection(workspace, outputHelper);
-        var serviceProvider = services.BuildServiceProvider();
+        using var serviceProvider = services.BuildServiceProvider();
         var initCommand = serviceProvider.GetRequiredService<InitCommand>();
 
         var parseResult = initCommand.Parse("init");
@@ -312,7 +313,7 @@ public class InitCommandTests(ITestOutputHelper outputHelper)
         File.WriteAllText(aspireConfigPath, customAspireConfig);
 
         var services = CliTestHelper.CreateServiceCollection(workspace, outputHelper);
-        var serviceProvider = services.BuildServiceProvider();
+        using var serviceProvider = services.BuildServiceProvider();
         var initCommand = serviceProvider.GetRequiredService<InitCommand>();
 
         var parseResult = initCommand.Parse("init");
@@ -346,7 +347,7 @@ public class InitCommandTests(ITestOutputHelper outputHelper)
         {
             options.InteractionServiceFactory = _ => interactionService;
         });
-        var serviceProvider = services.BuildServiceProvider();
+        using var serviceProvider = services.BuildServiceProvider();
         var initCommand = serviceProvider.GetRequiredService<InitCommand>();
 
         Assert.True(initCommand.Options.Single(o => o.Name == "--source").Hidden);
@@ -385,7 +386,7 @@ public class InitCommandTests(ITestOutputHelper outputHelper)
             options.ScaffoldingServiceFactory = _ => new TestScaffoldingService();
         });
 
-        var serviceProvider = services.BuildServiceProvider();
+        using var serviceProvider = services.BuildServiceProvider();
         var initCommand = serviceProvider.GetRequiredService<InitCommand>();
 
         var parseResult = initCommand.Parse("init");
@@ -415,7 +416,7 @@ public class InitCommandTests(ITestOutputHelper outputHelper)
             options.ScaffoldingServiceFactory = _ => new TestScaffoldingService();
         });
 
-        var serviceProvider = services.BuildServiceProvider();
+        using var serviceProvider = services.BuildServiceProvider();
         var initCommand = serviceProvider.GetRequiredService<InitCommand>();
 
         var parseResult = initCommand.Parse("init --language typescript");
@@ -463,7 +464,7 @@ public class InitCommandTests(ITestOutputHelper outputHelper)
             options.ScaffoldingServiceFactory = _ => scaffoldingService;
         });
 
-        var serviceProvider = services.BuildServiceProvider();
+        using var serviceProvider = services.BuildServiceProvider();
         var initCommand = serviceProvider.GetRequiredService<InitCommand>();
 
         var parseResult = initCommand.Parse("init --language typescript");
@@ -496,7 +497,11 @@ public class InitCommandTests(ITestOutputHelper outputHelper)
                 return [SkillLocation.Standard, SkillLocation.ClaudeCode, SkillLocation.OpenCode];
             }
 
-            return [SkillDefinition.Aspireify];
+            return items
+                .OfType<SkillDefinition>()
+                .Where(static skill => skill.HasName(CommonAgentApplicators.AspireifySkillName))
+                .Cast<object>()
+                .ToList();
         };
 
         var services = CliTestHelper.CreateServiceCollection(workspace, outputHelper, options =>
@@ -506,7 +511,7 @@ public class InitCommandTests(ITestOutputHelper outputHelper)
             options.ScaffoldingServiceFactory = _ => new TestScaffoldingService();
         });
 
-        var serviceProvider = services.BuildServiceProvider();
+        using var serviceProvider = services.BuildServiceProvider();
         var initCommand = serviceProvider.GetRequiredService<InitCommand>();
 
         var parseResult = initCommand.Parse("init --language typescript");
@@ -540,7 +545,11 @@ public class InitCommandTests(ITestOutputHelper outputHelper)
                 return [SkillLocation.Standard];
             }
 
-            return [SkillDefinition.Aspire];
+            return items
+                .OfType<SkillDefinition>()
+                .Where(static skill => skill.HasName(CommonAgentApplicators.AspireSkillName))
+                .Cast<object>()
+                .ToList();
         };
 
         var services = CliTestHelper.CreateServiceCollection(workspace, outputHelper, options =>
@@ -550,7 +559,7 @@ public class InitCommandTests(ITestOutputHelper outputHelper)
             options.ScaffoldingServiceFactory = _ => new TestScaffoldingService();
         });
 
-        var serviceProvider = services.BuildServiceProvider();
+        using var serviceProvider = services.BuildServiceProvider();
         var initCommand = serviceProvider.GetRequiredService<InitCommand>();
 
         var parseResult = initCommand.Parse("init --language typescript");
@@ -562,12 +571,77 @@ public class InitCommandTests(ITestOutputHelper outputHelper)
     }
 
     [Fact]
+    public async Task InitCommand_NonInteractive_WithNoneSkills_DoesNotInstallAgentSkills()
+    {
+        using var workspace = TemporaryWorkspace.Create(outputHelper);
+
+        var services = CliTestHelper.CreateServiceCollection(workspace, outputHelper);
+        using var serviceProvider = services.BuildServiceProvider();
+        var command = serviceProvider.GetRequiredService<RootCommand>();
+
+        var parseResult = command.Parse("init --non-interactive --skills none");
+        var exitCode = await parseResult.InvokeAsync().DefaultTimeout();
+
+        Assert.Equal(CliExitCodes.Success, exitCode);
+        Assert.True(File.Exists(Path.Combine(workspace.WorkspaceRoot.FullName, "apphost.cs")));
+
+        var aspireSkillPath = Path.Combine(workspace.WorkspaceRoot.FullName, ".agents", "skills", CommonAgentApplicators.AspireSkillName);
+        Assert.False(Directory.Exists(aspireSkillPath), $"Expected no aspire skill directory but found {aspireSkillPath}");
+
+        var aspireifySkillPath = Path.Combine(workspace.WorkspaceRoot.FullName, ".agents", "skills", CommonAgentApplicators.AspireifySkillName);
+        Assert.False(Directory.Exists(aspireifySkillPath), $"Expected no aspireify skill directory but found {aspireifySkillPath}");
+    }
+
+    [Fact]
+    public async Task InitCommand_NonInteractive_WithSkillLocationsNone_DoesNotInstallAgentSkills()
+    {
+        using var workspace = TemporaryWorkspace.Create(outputHelper);
+
+        var services = CliTestHelper.CreateServiceCollection(workspace, outputHelper);
+        using var serviceProvider = services.BuildServiceProvider();
+        var command = serviceProvider.GetRequiredService<RootCommand>();
+
+        var parseResult = command.Parse("init --non-interactive --skill-locations none");
+        var exitCode = await parseResult.InvokeAsync().DefaultTimeout();
+
+        Assert.Equal(CliExitCodes.Success, exitCode);
+        Assert.True(File.Exists(Path.Combine(workspace.WorkspaceRoot.FullName, "apphost.cs")));
+
+        // With --skill-locations none, no skill files should be installed regardless of skill selection.
+        var agentsDir = Path.Combine(workspace.WorkspaceRoot.FullName, ".agents", "skills");
+        Assert.False(Directory.Exists(agentsDir), $"Expected no agents/skills directory but found {agentsDir}");
+    }
+
+    [Fact]
+    public async Task InitCommand_NonInteractive_WithSkillLocationsAndSkills_InstallsOnlySpecifiedSkills()
+    {
+        using var workspace = TemporaryWorkspace.Create(outputHelper);
+
+        var services = CliTestHelper.CreateServiceCollection(workspace, outputHelper);
+        using var serviceProvider = services.BuildServiceProvider();
+        var command = serviceProvider.GetRequiredService<RootCommand>();
+
+        var parseResult = command.Parse($"init --non-interactive --skill-locations standard --skills {CommonAgentApplicators.AspireSkillName}");
+        var exitCode = await parseResult.InvokeAsync().DefaultTimeout();
+
+        Assert.Equal(CliExitCodes.Success, exitCode);
+        Assert.True(File.Exists(Path.Combine(workspace.WorkspaceRoot.FullName, "apphost.cs")));
+
+        var aspireSkillPath = Path.Combine(workspace.WorkspaceRoot.FullName, ".agents", "skills", CommonAgentApplicators.AspireSkillName, "SKILL.md");
+        Assert.True(File.Exists(aspireSkillPath), $"Expected aspire skill file at {aspireSkillPath}");
+
+        // aspireify was not requested, so it should not be installed.
+        var aspireifySkillPath = Path.Combine(workspace.WorkspaceRoot.FullName, ".agents", "skills", CommonAgentApplicators.AspireifySkillName);
+        Assert.False(Directory.Exists(aspireifySkillPath), $"Expected no aspireify skill directory but found {aspireifySkillPath}");
+    }
+
+    [Fact]
     public async Task InitCommand_WhenNoSolutionExists_SingleFileSkeletonPinsSdkVersion()
     {
         using var workspace = TemporaryWorkspace.Create(outputHelper);
 
         var services = CliTestHelper.CreateServiceCollection(workspace, outputHelper);
-        var serviceProvider = services.BuildServiceProvider();
+        using var serviceProvider = services.BuildServiceProvider();
         var initCommand = serviceProvider.GetRequiredService<InitCommand>();
 
         var parseResult = initCommand.Parse("init");
@@ -601,7 +675,7 @@ public class InitCommandTests(ITestOutputHelper outputHelper)
         await File.WriteAllTextAsync(configPath, existingConfig.ToJsonString());
 
         var services = CliTestHelper.CreateServiceCollection(workspace, outputHelper);
-        var serviceProvider = services.BuildServiceProvider();
+        using var serviceProvider = services.BuildServiceProvider();
         var initCommand = serviceProvider.GetRequiredService<InitCommand>();
 
         var parseResult = initCommand.Parse("init");
@@ -649,7 +723,7 @@ public class InitCommandTests(ITestOutputHelper outputHelper)
         await File.WriteAllTextAsync(appHostPath, preExistingContent);
 
         var services = CliTestHelper.CreateServiceCollection(workspace, outputHelper);
-        var serviceProvider = services.BuildServiceProvider();
+        using var serviceProvider = services.BuildServiceProvider();
         var initCommand = serviceProvider.GetRequiredService<InitCommand>();
 
         var parseResult = initCommand.Parse("init");
@@ -691,7 +765,7 @@ public class InitCommandTests(ITestOutputHelper outputHelper)
             };
         });
 
-        var serviceProvider = services.BuildServiceProvider();
+        using var serviceProvider = services.BuildServiceProvider();
         var initCommand = serviceProvider.GetRequiredService<InitCommand>();
 
         var parseResult = initCommand.Parse("init");
@@ -748,13 +822,13 @@ public class InitCommandTests(ITestOutputHelper outputHelper)
                             [new NuGetPackageCli { Id = "Aspire.ProjectTemplates", Source = "pr-hive", Version = "99.0.0-pr.12345" }])
                 };
 
-                var implicitChannel = PackageChannel.CreateImplicitChannel(implicitCache, new TestFeatures());
+                var implicitChannel = PackageChannel.CreateImplicitChannel(implicitCache, new TestFeatures(), NullLogger.Instance);
                 var prHiveChannel = PackageChannel.CreateExplicitChannel(
                     "pr-12345",
                     PackageChannelQuality.Both,
                     [new PackageMapping("Aspire*", hivesDir.FullName + "/pr-12345/packages")],
                     prHiveCache,
-                    features: new TestFeatures());
+                    features: new TestFeatures(), NullLogger.Instance);
 
                 return new TestPackagingService
                 {
@@ -779,7 +853,7 @@ public class InitCommandTests(ITestOutputHelper outputHelper)
             };
         });
 
-        var serviceProvider = services.BuildServiceProvider();
+        using var serviceProvider = services.BuildServiceProvider();
         var initCommand = serviceProvider.GetRequiredService<InitCommand>();
 
         var parseResult = initCommand.Parse("init");
@@ -814,7 +888,7 @@ public class InitCommandTests(ITestOutputHelper outputHelper)
                     GetTemplatePackagesAsyncCallback = (_, _, _, _) =>
                         throw new NuGetPackageCacheException("Package search failed: simulated network failure")
                 };
-                var implicitChannel = PackageChannel.CreateImplicitChannel(fakeCache, new TestFeatures());
+                var implicitChannel = PackageChannel.CreateImplicitChannel(fakeCache, new TestFeatures(), NullLogger.Instance);
                 return new TestPackagingService
                 {
                     GetChannelsAsyncCallback = _ => Task.FromResult<IEnumerable<PackageChannel>>([implicitChannel])
@@ -832,7 +906,7 @@ public class InitCommandTests(ITestOutputHelper outputHelper)
             };
         });
 
-        var serviceProvider = services.BuildServiceProvider();
+        using var serviceProvider = services.BuildServiceProvider();
         var initCommand = serviceProvider.GetRequiredService<InitCommand>();
 
         var parseResult = initCommand.Parse("init");
@@ -887,7 +961,7 @@ public class InitCommandTests(ITestOutputHelper outputHelper)
             };
         });
 
-        var serviceProvider = services.BuildServiceProvider();
+        using var serviceProvider = services.BuildServiceProvider();
         var initCommand = serviceProvider.GetRequiredService<InitCommand>();
 
         var parseResult = initCommand.Parse("init");
@@ -936,7 +1010,7 @@ public class InitCommandTests(ITestOutputHelper outputHelper)
             };
         });
 
-        var serviceProvider = services.BuildServiceProvider();
+        using var serviceProvider = services.BuildServiceProvider();
         var initCommand = serviceProvider.GetRequiredService<InitCommand>();
 
         var parseResult = initCommand.Parse("init");
@@ -954,9 +1028,11 @@ public class InitCommandTests(ITestOutputHelper outputHelper)
     /// workspace <c>nuget.config</c> emitted by <c>NuGetConfigMerger</c> and verifies it
     /// carries the matching feed URL — proving the resolver picked the binary's identity
     /// channel rather than skipping the merge or selecting a different registered channel.
+    /// The <c>stable</c> channel is intentionally excluded: its packages live on nuget.org
+    /// (the ambient default source), so it drops no <c>nuget.config</c>; that case is covered
+    /// by <see cref="InitCommand_SingleFileMode_StableIdentity_DoesNotCreateNuGetConfig"/>.
     /// </summary>
     [Theory]
-    [InlineData("stable")]
     [InlineData("staging")]
     [InlineData("daily")]
     [InlineData("pr-12345")]
@@ -970,7 +1046,7 @@ public class InitCommandTests(ITestOutputHelper outputHelper)
             options.PackagingServiceFactory = _ => CreateNamedChannelPackagingService(contextChannel);
         });
 
-        var serviceProvider = services.BuildServiceProvider();
+        using var serviceProvider = services.BuildServiceProvider();
         var initCommand = serviceProvider.GetRequiredService<InitCommand>();
 
         var parseResult = initCommand.Parse("init");
@@ -983,6 +1059,39 @@ public class InitCommandTests(ITestOutputHelper outputHelper)
         Assert.True(File.Exists(nugetConfigPath), $"nuget.config should be created in workspace for channel '{contextChannel}'.");
 
         AssertNuGetConfigHasChannelShape(nugetConfigPath, contextChannel);
+    }
+
+    /// <summary>
+    /// Inverse of <see cref="InitCommand_SingleFileMode_NoChannelOverride_WiresNuGetConfigToCliExecutionContextChannel"/>
+    /// for the <c>stable</c> channel: a stable-identity single-file <c>aspire init</c> must NOT
+    /// drop a workspace <c>nuget.config</c>. The stable channel's packages live on nuget.org —
+    /// the ambient default source — so a <c>&lt;clear/&gt;</c>-based config would be redundant
+    /// and would wipe any additional feeds the user already relies on. The packaging service
+    /// still registers a <c>stable</c> channel with a (test) feed source, proving the skip is
+    /// driven by the channel name rather than an absence of mappings.
+    /// </summary>
+    [Fact]
+    public async Task InitCommand_SingleFileMode_StableIdentity_DoesNotCreateNuGetConfig()
+    {
+        using var workspace = TemporaryWorkspace.Create(outputHelper);
+
+        var services = CliTestHelper.CreateServiceCollection(workspace, outputHelper, options =>
+        {
+            options.CliExecutionContextFactory = _ => CreateExecutionContextForChannel(workspace.WorkspaceRoot, PackageChannelNames.Stable);
+            options.PackagingServiceFactory = _ => CreateNamedChannelPackagingService(PackageChannelNames.Stable);
+        });
+
+        using var serviceProvider = services.BuildServiceProvider();
+        var initCommand = serviceProvider.GetRequiredService<InitCommand>();
+
+        var parseResult = initCommand.Parse("init");
+        var exitCode = await parseResult.InvokeAsync().DefaultTimeout();
+
+        Assert.Equal(CliExitCodes.Success, exitCode);
+        Assert.True(File.Exists(Path.Combine(workspace.WorkspaceRoot.FullName, "apphost.cs")));
+
+        var nugetConfigPath = Path.Combine(workspace.WorkspaceRoot.FullName, "nuget.config");
+        Assert.False(File.Exists(nugetConfigPath), "stable-identity init must not drop a nuget.config (stable packages resolve from ambient nuget.org).");
     }
 
     /// <summary>
@@ -1008,7 +1117,7 @@ public class InitCommandTests(ITestOutputHelper outputHelper)
             options.PackagingServiceFactory = _ => CreateNamedChannelPackagingService(contextChannel);
         });
 
-        var serviceProvider = services.BuildServiceProvider();
+        using var serviceProvider = services.BuildServiceProvider();
         var initCommand = serviceProvider.GetRequiredService<InitCommand>();
 
         var parseResult = initCommand.Parse("init");
@@ -1050,7 +1159,7 @@ public class InitCommandTests(ITestOutputHelper outputHelper)
             options.PackagingServiceFactory = _ => CreateNamedChannelPackagingService("daily");
         });
 
-        var serviceProvider = services.BuildServiceProvider();
+        using var serviceProvider = services.BuildServiceProvider();
         var initCommand = serviceProvider.GetRequiredService<InitCommand>();
 
         var parseResult = initCommand.Parse("init");
@@ -1081,7 +1190,7 @@ public class InitCommandTests(ITestOutputHelper outputHelper)
             options.PackagingServiceFactory = _ => CreateNamedChannelPackagingService("daily");
         });
 
-        var serviceProvider = services.BuildServiceProvider();
+        using var serviceProvider = services.BuildServiceProvider();
         var initCommand = serviceProvider.GetRequiredService<InitCommand>();
 
         var parseResult = initCommand.Parse("init");
@@ -1117,7 +1226,7 @@ public class InitCommandTests(ITestOutputHelper outputHelper)
                     GetTemplatePackagesAsyncCallback = (_, _, _, _) =>
                         Task.FromResult<IEnumerable<NuGetPackageCli>>([])
                 };
-                var implicitChannel = PackageChannel.CreateImplicitChannel(fakeCache, new TestFeatures());
+                var implicitChannel = PackageChannel.CreateImplicitChannel(fakeCache, new TestFeatures(), NullLogger.Instance);
                 return new TestPackagingService
                 {
                     GetChannelsAsyncCallback = _ => Task.FromResult<IEnumerable<PackageChannel>>([implicitChannel])
@@ -1125,7 +1234,7 @@ public class InitCommandTests(ITestOutputHelper outputHelper)
             };
         });
 
-        var serviceProvider = services.BuildServiceProvider();
+        using var serviceProvider = services.BuildServiceProvider();
         var initCommand = serviceProvider.GetRequiredService<InitCommand>();
 
         var parseResult = initCommand.Parse("init");
@@ -1177,7 +1286,7 @@ public class InitCommandTests(ITestOutputHelper outputHelper)
             };
         });
 
-        var serviceProvider = services.BuildServiceProvider();
+        using var serviceProvider = services.BuildServiceProvider();
         var initCommand = serviceProvider.GetRequiredService<InitCommand>();
 
         var parseResult = initCommand.Parse("init");
@@ -1225,7 +1334,7 @@ public class InitCommandTests(ITestOutputHelper outputHelper)
             };
         });
 
-        var serviceProvider = services.BuildServiceProvider();
+        using var serviceProvider = services.BuildServiceProvider();
         var initCommand = serviceProvider.GetRequiredService<InitCommand>();
 
         var parseResult = initCommand.Parse("init");
@@ -1279,7 +1388,7 @@ public class InitCommandTests(ITestOutputHelper outputHelper)
             };
         });
 
-        var serviceProvider = services.BuildServiceProvider();
+        using var serviceProvider = services.BuildServiceProvider();
         var initCommand = serviceProvider.GetRequiredService<InitCommand>();
 
         var parseResult = initCommand.Parse("init");
@@ -1331,7 +1440,7 @@ public class InitCommandTests(ITestOutputHelper outputHelper)
             };
         });
 
-        var serviceProvider = services.BuildServiceProvider();
+        using var serviceProvider = services.BuildServiceProvider();
         var initCommand = serviceProvider.GetRequiredService<InitCommand>();
 
         var parseResult = initCommand.Parse("init");
@@ -1401,7 +1510,7 @@ public class InitCommandTests(ITestOutputHelper outputHelper)
             };
         });
 
-        var serviceProvider = services.BuildServiceProvider();
+        using var serviceProvider = services.BuildServiceProvider();
         var initCommand = serviceProvider.GetRequiredService<InitCommand>();
 
         var parseResult = initCommand.Parse("init");
@@ -1462,7 +1571,7 @@ public class InitCommandTests(ITestOutputHelper outputHelper)
                         Task.FromResult<IEnumerable<NuGetPackageCli>>(
                             [new NuGetPackageCli { Id = "Aspire.ProjectTemplates", Source = "nuget.org", Version = "13.3.0" }])
                 };
-                var implicitChannel = PackageChannel.CreateImplicitChannel(fakeCache, new TestFeatures());
+                var implicitChannel = PackageChannel.CreateImplicitChannel(fakeCache, new TestFeatures(), NullLogger.Instance);
                 return new TestPackagingService
                 {
                     GetChannelsAsyncCallback = _ => Task.FromResult<IEnumerable<PackageChannel>>([implicitChannel])
@@ -1486,7 +1595,7 @@ public class InitCommandTests(ITestOutputHelper outputHelper)
             };
         });
 
-        var serviceProvider = services.BuildServiceProvider();
+        using var serviceProvider = services.BuildServiceProvider();
         var initCommand = serviceProvider.GetRequiredService<InitCommand>();
 
         var parseResult = initCommand.Parse("init");
@@ -1510,10 +1619,11 @@ public class InitCommandTests(ITestOutputHelper outputHelper)
     /// wasting work and emitting confusing errors. The capture inside
     /// <c>NewProjectAsyncCallback</c> guards both the ordering and the file content; the
     /// final structural assertion guards <c>&lt;clear/&gt;</c> + <c>Aspire*</c> mapping
-    /// correctness.
+    /// correctness. The <c>stable</c> channel is intentionally excluded: its packages live on
+    /// nuget.org (the ambient default source), so it drops no <c>NuGet.config</c>; that case is
+    /// covered by <see cref="InitCommand_ProjectMode_StableIdentity_DoesNotCreateNuGetConfig"/>.
     /// </summary>
     [Theory]
-    [InlineData("stable")]
     [InlineData("staging")]
     [InlineData("daily")]
     [InlineData("pr-12345")]
@@ -1553,7 +1663,7 @@ public class InitCommandTests(ITestOutputHelper outputHelper)
             };
         });
 
-        var serviceProvider = services.BuildServiceProvider();
+        using var serviceProvider = services.BuildServiceProvider();
         var initCommand = serviceProvider.GetRequiredService<InitCommand>();
 
         var parseResult = initCommand.Parse("init");
@@ -1566,6 +1676,53 @@ public class InitCommandTests(ITestOutputHelper outputHelper)
         Assert.Contains(SourceForChannel(contextChannel), nugetConfigContentAtNewProjectTime!);
 
         AssertNuGetConfigHasChannelShape(nugetConfigPath, contextChannel);
+    }
+
+    /// <summary>
+    /// Inverse of <see cref="InitCommand_ProjectMode_NoChannelOverride_WiresNuGetConfigInSolutionDirToCliExecutionContextChannel"/>
+    /// for the <c>stable</c> channel: a stable-identity project-mode <c>aspire init</c> must NOT
+    /// drop a solution-directory <c>NuGet.config</c>. The stable channel's packages live on
+    /// nuget.org — the ambient default source — so a <c>&lt;clear/&gt;</c>-based config would be
+    /// redundant and would wipe any additional feeds the user already relies on. The
+    /// aspire-apphost template's restore post-action resolves from nuget.org directly, so no
+    /// channel-pinning config is needed.
+    /// </summary>
+    [Fact]
+    public async Task InitCommand_ProjectMode_StableIdentity_DoesNotCreateNuGetConfig()
+    {
+        using var workspace = TemporaryWorkspace.Create(outputHelper);
+
+        var solutionFile = new FileInfo(Path.Combine(workspace.WorkspaceRoot.FullName, "Test.sln"));
+        File.WriteAllText(solutionFile.FullName, "Fake solution file");
+
+        var services = CliTestHelper.CreateServiceCollection(workspace, outputHelper, options =>
+        {
+            options.CliExecutionContextFactory = _ => CreateExecutionContextForChannel(workspace.WorkspaceRoot, PackageChannelNames.Stable);
+            options.PackagingServiceFactory = _ => CreateNamedChannelPackagingService(PackageChannelNames.Stable);
+
+            options.DotNetCliRunnerFactory = _ =>
+            {
+                var runner = new TestDotNetCliRunner();
+                runner.InstallTemplateAsyncCallback = (_, version, _, _, _, _, _) => (0, version);
+                runner.NewProjectAsyncCallback = (_, _, outputPath, _, _) =>
+                {
+                    Directory.CreateDirectory(outputPath);
+                    return 0;
+                };
+                return runner;
+            };
+        });
+
+        using var serviceProvider = services.BuildServiceProvider();
+        var initCommand = serviceProvider.GetRequiredService<InitCommand>();
+
+        var parseResult = initCommand.Parse("init");
+        var exitCode = await parseResult.InvokeAsync().DefaultTimeout();
+
+        Assert.Equal(CliExitCodes.Success, exitCode);
+
+        var nugetConfigPath = Path.Combine(workspace.WorkspaceRoot.FullName, "nuget.config");
+        Assert.False(File.Exists(nugetConfigPath), "stable-identity init must not drop a nuget.config (stable packages resolve from ambient nuget.org).");
     }
 
     /// <summary>
@@ -1602,7 +1759,7 @@ public class InitCommandTests(ITestOutputHelper outputHelper)
             // template-related runs on the rerun-recovery path.
         });
 
-        var serviceProvider = services.BuildServiceProvider();
+        using var serviceProvider = services.BuildServiceProvider();
         var initCommand = serviceProvider.GetRequiredService<InitCommand>();
 
         var parseResult = initCommand.Parse("init");
@@ -1639,7 +1796,7 @@ public class InitCommandTests(ITestOutputHelper outputHelper)
             options.PackagingServiceFactory = _ => CreateNamedChannelPackagingService(contextChannel);
         });
 
-        var serviceProvider = services.BuildServiceProvider();
+        using var serviceProvider = services.BuildServiceProvider();
         var initCommand = serviceProvider.GetRequiredService<InitCommand>();
 
         var parseResult = initCommand.Parse("init");
@@ -1688,7 +1845,7 @@ public class InitCommandTests(ITestOutputHelper outputHelper)
             };
         });
 
-        var serviceProvider = services.BuildServiceProvider();
+        using var serviceProvider = services.BuildServiceProvider();
         var initCommand = serviceProvider.GetRequiredService<InitCommand>();
 
         var parseResult = initCommand.Parse("init");
@@ -1750,7 +1907,7 @@ public class InitCommandTests(ITestOutputHelper outputHelper)
             };
         });
 
-        var serviceProvider = services.BuildServiceProvider();
+        using var serviceProvider = services.BuildServiceProvider();
         var initCommand = serviceProvider.GetRequiredService<InitCommand>();
 
         var parseResult = initCommand.Parse("init");
@@ -1801,7 +1958,7 @@ public class InitCommandTests(ITestOutputHelper outputHelper)
             };
         });
 
-        var serviceProvider = services.BuildServiceProvider();
+        using var serviceProvider = services.BuildServiceProvider();
         var initCommand = serviceProvider.GetRequiredService<InitCommand>();
 
         var parseResult = initCommand.Parse("init");
@@ -1848,7 +2005,7 @@ public class InitCommandTests(ITestOutputHelper outputHelper)
                         Task.FromResult<IEnumerable<NuGetPackageCli>>(
                             [new NuGetPackageCli { Id = "Aspire.ProjectTemplates", Source = "nuget.org", Version = "13.3.0" }])
                 };
-                var implicitChannel = PackageChannel.CreateImplicitChannel(fakeCache, new TestFeatures());
+                var implicitChannel = PackageChannel.CreateImplicitChannel(fakeCache, new TestFeatures(), NullLogger.Instance);
                 return new TestPackagingService
                 {
                     GetChannelsAsyncCallback = _ => Task.FromResult<IEnumerable<PackageChannel>>([implicitChannel])
@@ -1868,7 +2025,7 @@ public class InitCommandTests(ITestOutputHelper outputHelper)
             };
         });
 
-        var serviceProvider = services.BuildServiceProvider();
+        using var serviceProvider = services.BuildServiceProvider();
         var initCommand = serviceProvider.GetRequiredService<InitCommand>();
 
         var parseResult = initCommand.Parse("init");
@@ -1915,7 +2072,7 @@ public class InitCommandTests(ITestOutputHelper outputHelper)
             };
         });
 
-        var serviceProvider = services.BuildServiceProvider();
+        using var serviceProvider = services.BuildServiceProvider();
         var initCommand = serviceProvider.GetRequiredService<InitCommand>();
 
         var parseResult = initCommand.Parse("init");
@@ -1972,7 +2129,7 @@ public class InitCommandTests(ITestOutputHelper outputHelper)
                 PackageChannelQuality.Both,
                 [new PackageMapping("Aspire*", channelSource), new PackageMapping(PackageMapping.AllPackages, fallbackSource)],
                 fakeCache,
-                features: new TestFeatures());
+                features: new TestFeatures(), NullLogger.Instance);
         }).ToArray();
 
         return new TestPackagingService

@@ -178,19 +178,6 @@ public class AppHostServerProjectTests(ITestOutputHelper outputHelper) : IDispos
     }
 
     [Fact]
-    public void DefaultSdkVersion_ReturnsValidVersion()
-    {
-        // Act
-        var version = DotNetBasedAppHostServerProject.DefaultSdkVersion;
-
-        // Assert
-        Assert.NotNull(version);
-        Assert.NotEmpty(version);
-        // Should not contain '+' (commit hash should be stripped)
-        Assert.DoesNotContain("+", version);
-    }
-
-    [Fact]
     public void ProjectModelPath_IsStableForSameAppPath()
     {
         // Arrange
@@ -299,15 +286,15 @@ public class AppHostServerProjectTests(ITestOutputHelper outputHelper) : IDispos
                 {
                     new PackageMapping("Aspire*", prOldHivePath),
                     new PackageMapping(PackageMapping.AllPackages, "https://api.nuget.org/v3/index.json")
-                }, nugetCache, new TestFeatures());
+                }, nugetCache, new TestFeatures(), NullLogger.Instance);
 
                 var prNewChannel = PackageChannel.CreateExplicitChannel("pr-new", PackageChannelQuality.Prerelease, new[]
                 {
                     new PackageMapping("Aspire*", prNewHivePath),
                     new PackageMapping(PackageMapping.AllPackages, "https://api.nuget.org/v3/index.json")
-                }, nugetCache, new TestFeatures());
+                }, nugetCache, new TestFeatures(), NullLogger.Instance);
 
-                var implicitChannel = PackageChannel.CreateImplicitChannel(nugetCache, new TestFeatures());
+                var implicitChannel = PackageChannel.CreateImplicitChannel(nugetCache, new TestFeatures(), NullLogger.Instance);
 
                 return Task.FromResult<IEnumerable<PackageChannel>>(new[] { implicitChannel, prOldChannel, prNewChannel });
             }
@@ -392,7 +379,7 @@ public class AppHostServerProjectTests(ITestOutputHelper outputHelper) : IDispos
         {
             new PackageMapping("Aspire*", "https://pkgs.dev.azure.com/fake/v3/index.json"),
             new PackageMapping(PackageMapping.AllPackages, "https://api.nuget.org/v3/index.json")
-        }, nugetCache, new TestFeatures());
+        }, nugetCache, new TestFeatures(), NullLogger.Instance);
         var packagingService = new TestPackagingService
         {
             GetChannelsAsyncCallback = _ => Task.FromResult<IEnumerable<PackageChannel>>(new[] { dailyChannel })
@@ -444,7 +431,7 @@ public class AppHostServerProjectTests(ITestOutputHelper outputHelper) : IDispos
         var dailyChannel = PackageChannel.CreateExplicitChannel("daily", PackageChannelQuality.Prerelease, new[]
         {
             new PackageMapping("Aspire*", channelFeed)
-        }, nugetCache, new TestFeatures());
+        }, nugetCache, new TestFeatures(), NullLogger.Instance);
         var packagingService = new TestPackagingService
         {
             GetChannelsAsyncCallback = _ => Task.FromResult<IEnumerable<PackageChannel>>(new[] { dailyChannel })
